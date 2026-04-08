@@ -1,0 +1,23 @@
+{
+  "schemaVersion": "2",
+  "id": "hello-app",
+  "name": "Hello App",
+  "version": "1.0.0",
+  "appType": "static",
+  "entry": "index.html",
+  "launch": {
+    "kind": "static"
+  },
+  "display": {
+    "shortName": "Hello",
+    "storeVisible": true,
+    "showInLibrary": true
+  },
+  "pwa": {
+    "name": "Hello App",
+    "shortName": "Hello",
+    "display": "standalone",
+    "backgroundColor": "#111723",
+    "themeColor": "#4f7cff"
+  }
+}

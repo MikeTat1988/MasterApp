@@ -1,0 +1,10 @@
+{
+  "cloudflaredPath": "C:\\Program Files (x86)\\cloudflared\\cloudflared.exe",
+  "incomingFolder": "C:\\MasterApp\\Incoming",
+  "processedFolder": "C:\\MasterApp\\Processed",
+  "failedFolder": "C:\\MasterApp\\Failed",
+  "publishedFolder": "C:\\MasterApp\\Published",
+  "autoStartTunnel": false,
+  "logLevel": "Info",
+  "packageScanIntervalSeconds": 5
+}

@@ -1,0 +1,29 @@
+.codex/
+.share-stage/
+.test-state/
+.vs/
+.idea/
+artifacts/
+**/bin/
+**/obj/
+**/dist/
+
+*.tmp
+*.user
+*.suo
+*.pdb
+*.cache
+
+clean-share-test.zip
+
+# Local app state and machine-specific files
+state/
+logs/
+secrets.json
+settings.json
+runtime-state.json
+
+# Keep checked-in state templates
+!templates/
+!templates/state/
+!templates/state/*.example.json

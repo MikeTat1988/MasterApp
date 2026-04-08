@@ -1,0 +1,27 @@
+{
+  "schemaVersion": "2",
+  "id": "remote-mouse-lite",
+  "name": "Remote Mouse Lite",
+  "version": "15.0.0",
+  "appType": "portable",
+  "icon": "RemoteMouseLite/Assets/apple-touch-icon.png",
+  "launch": {
+    "kind": "webApp",
+    "executablePath": "dist/self-contained/RemoteMouseLite.exe",
+    "port": 5277,
+    "healthPath": "/",
+    "startupTimeoutSeconds": 20
+  },
+  "display": {
+    "shortName": "Mouse",
+    "storeVisible": true,
+    "showInLibrary": true
+  },
+  "pwa": {
+    "name": "Remote Mouse Lite",
+    "shortName": "Mouse",
+    "display": "standalone",
+    "backgroundColor": "#111723",
+    "themeColor": "#4f7cff"
+  }
+}

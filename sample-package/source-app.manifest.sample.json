@@ -1,0 +1,35 @@
+{
+  "schemaVersion": "2",
+  "id": "my-movie-db",
+  "name": "MyMovieDB",
+  "version": "9.0.0",
+  "appType": "source",
+  "icon": "tools/MyMovieDB.Tray/Assets/mymoviedb.ico",
+  "launch": {
+    "kind": "webApp",
+    "executablePath": "src/LocalMovieVault.Web/bin/Release/net8.0/LocalMovieVault.Web.exe",
+    "workingDirectory": "src/LocalMovieVault.Web",
+    "port": 5057,
+    "healthPath": "/",
+    "startupTimeoutSeconds": 25
+  },
+  "build": {
+    "installCommand": "dotnet publish .\\src\\LocalMovieVault.Web\\LocalMovieVault.Web.csproj -c Release",
+    "workingDirectory": "."
+  },
+  "publish": {
+    "command": "dotnet publish .\\src\\LocalMovieVault.Web\\LocalMovieVault.Web.csproj -c Release -r win-x64 --self-contained true /p:PublishSingleFile=true",
+    "workingDirectory": ".",
+    "outputPath": "src/LocalMovieVault.Web/bin/Release/net8.0/win-x64/publish",
+    "preferSingleFile": true,
+    "createZip": true
+  },
+  "dataDirectories": [
+    "src/LocalMovieVault.Web/App_Data"
+  ],
+  "display": {
+    "shortName": "Movies",
+    "storeVisible": true,
+    "showInLibrary": true
+  }
+}
