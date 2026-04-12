@@ -23,6 +23,7 @@ public sealed class FileLogManager
     public void Tunnel(string source, string message, Exception? ex = null) => Write(LogKind.Tunnel, "INFO", source, message, ex);
     public void Packages(string source, string message, Exception? ex = null) => Write(LogKind.Packages, "INFO", source, message, ex);
     public void Ui(string source, string message, Exception? ex = null) => Write(LogKind.Ui, "INFO", source, message, ex);
+    public void Codex(string source, string message, Exception? ex = null) => Write(LogKind.Codex, "INFO", source, message, ex);
 
     private void Write(LogKind kind, string level, string source, string message, Exception? ex)
     {

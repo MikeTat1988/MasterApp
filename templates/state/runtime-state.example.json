@@ -3,5 +3,12 @@
   "lastPackageResult": null,
   "lastPublishResult": null,
   "lastPackageScanAtUtc": null,
-  "lastPackageScanReason": null
+  "lastPackageScanReason": null,
+  "codex": {
+    "activeRun": null,
+    "pendingApproval": null,
+    "updatedAtUtc": null
+  },
+  "codexOperations": [],
+  "lastRelaunch": null
 }

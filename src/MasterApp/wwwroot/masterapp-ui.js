@@ -11,8 +11,22 @@ const masterAppState = {
   latestLogName: "app",
   latestLogText: "Choose a log to inspect.",
   latestLogKey: "",
+  latestCodex: null,
+  latestCodexKey: "",
+  codexDraft: "",
+  codexSelectedMode: "auto",
+  codexSelectedWorkspace: "",
+  codexSelectedModel: "",
+  codexSelectedChatId: "",
+  codexRecentsOpen: false,
+  codexDetailsOpen: false,
+  codexConnectionState: "connecting",
+  codexLastError: "",
+  codexEventSource: null,
   pageMode: document.body?.dataset.page || "dashboard"
 };
+
+const ICON_SPRITE_ID = "masterapp-icon-sprite";
 
 const iconPaths = {
   bell: "M12 22a2.5 2.5 0 0 0 2.45-2h-4.9A2.5 2.5 0 0 0 12 22Zm7-6V11a7 7 0 1 0-14 0v5L3 18v1h18v-1l-2-2Z",
@@ -33,7 +47,8 @@ const iconPaths = {
   close: "M6 6l12 12M18 6 6 18",
   globe: "M12 3.5a8.5 8.5 0 1 0 0 17 8.5 8.5 0 0 0 0-17Zm0 0c2.6 2.3 4 5.2 4 8.5s-1.4 6.2-4 8.5m0-17c-2.6 2.3-4 5.2-4 8.5s1.4 6.2 4 8.5M4.3 9.5h15.4M4.3 14.5h15.4",
   export: "M12 4v10m0 0 4-4m-4 4-4-4M5 15.5v1A2.5 2.5 0 0 0 7.5 19h9a2.5 2.5 0 0 0 2.5-2.5v-1",
-  trash: "M5 7.5h14M9.5 4.5h5M8 7.5l.8 11h6.4l.8-11M10 10.5v5M14 10.5v5"
+  trash: "M5 7.5h14M9.5 4.5h5M8 7.5l.8 11h6.4l.8-11M10 10.5v5M14 10.5v5",
+  chat: "M7 18.5 4.5 20v-3.8A7.5 7.5 0 1 1 19.5 9 7.4 7.4 0 0 1 12 16.5H9"
 };
 
 const fallbackLogos = [
@@ -46,7 +61,6 @@ const fallbackLogos = [
 ];
 
 const quickActions = [
-  { label: "Refresh", icon: "refresh", action: () => refreshAll() },
   { label: "Scan inbox", icon: "inbox", action: () => postAction("/api/packages/rescan") },
   { label: "Open tunnel", icon: "tunnel", action: () => openPublic() },
   { label: "Logs", icon: "logs", action: () => setLogFocus() }
@@ -58,15 +72,19 @@ function initMasterApp() {
     return;
   }
 
+  ensureIconSprite();
+
   if (masterAppState.pageMode === "store") {
     masterAppState.currentTab = "store";
   }
 
   renderAppShell({ preserveScroll: false });
+  connectCodexEvents();
   refreshAll();
   loadLog(masterAppState.latestLogName);
   setInterval(refreshStatus, 5000);
   setInterval(refreshApps, 9000);
+  setInterval(refreshCodex, 12000);
 }
 
 function renderAppShell(options = {}) {
@@ -77,6 +95,8 @@ function renderAppShell(options = {}) {
   }
 
   const scrollTop = preserveScroll ? window.scrollY : 0;
+  const scrollContainer = appRoot.querySelector(".app-content");
+  const contentScrollTop = preserveScroll && scrollContainer instanceof HTMLElement ? scrollContainer.scrollTop : 0;
   const activeElement = document.activeElement;
   const activeId = activeElement instanceof HTMLElement ? activeElement.id : "";
   const selectionStart = activeElement && "selectionStart" in activeElement ? activeElement.selectionStart : null;
@@ -90,6 +110,7 @@ function renderAppShell(options = {}) {
         ${renderDashboardPage()}
         ${renderLibraryPage()}
         ${renderStorePage()}
+        ${renderCodexPage()}
       </div>
       ${BottomNav()}
     </div>
@@ -100,6 +121,10 @@ function renderAppShell(options = {}) {
   if (preserveScroll) {
     requestAnimationFrame(() => {
       window.scrollTo({ top: scrollTop, behavior: "auto" });
+      const nextScrollContainer = appRoot.querySelector(".app-content");
+      if (nextScrollContainer instanceof HTMLElement) {
+        nextScrollContainer.scrollTop = contentScrollTop;
+      }
     });
   }
 
@@ -114,6 +139,54 @@ function renderAppShell(options = {}) {
       });
     }
   }
+}
+
+function renderCodexUi() {
+  if (masterAppState.currentTab !== "codex") {
+    renderAppShell();
+    return;
+  }
+
+  const appRoot = document.getElementById("app");
+  const scrollContainer = appRoot?.querySelector(".app-content");
+  const contentScrollTop = scrollContainer instanceof HTMLElement ? scrollContainer.scrollTop : 0;
+  const activeElement = document.activeElement;
+  const activeId = activeElement instanceof HTMLElement ? activeElement.id : "";
+  const selectionStart = activeElement && "selectionStart" in activeElement ? activeElement.selectionStart : null;
+  const selectionEnd = activeElement && "selectionEnd" in activeElement ? activeElement.selectionEnd : null;
+  const existingPage = document.getElementById("page-codex");
+  if (!(existingPage instanceof HTMLElement)) {
+    renderAppShell();
+    return;
+  }
+
+  const wrapper = document.createElement("div");
+  wrapper.innerHTML = renderCodexPage().trim();
+  const nextPage = wrapper.firstElementChild;
+  if (!(nextPage instanceof HTMLElement)) {
+    renderAppShell();
+    return;
+  }
+
+  existingPage.replaceWith(nextPage);
+  bindCodexInteractions();
+
+  requestAnimationFrame(() => {
+    const nextScrollContainer = document.getElementById("app")?.querySelector(".app-content");
+    if (nextScrollContainer instanceof HTMLElement) {
+      nextScrollContainer.scrollTop = contentScrollTop;
+    }
+
+    if (activeId) {
+      const nextActive = document.getElementById(activeId);
+      if (nextActive instanceof HTMLElement) {
+        nextActive.focus({ preventScroll: true });
+        if (typeof selectionStart === "number" && typeof selectionEnd === "number" && "setSelectionRange" in nextActive) {
+          nextActive.setSelectionRange(selectionStart, selectionEnd);
+        }
+      }
+    }
+  });
 }
 
 function bindInteractions() {
@@ -180,6 +253,93 @@ function bindInteractions() {
       renderAppShell();
     });
   });
+
+  bindCodexInteractions();
+}
+
+function bindCodexInteractions() {
+  const codexPrompt = document.getElementById("codex-prompt");
+  if (codexPrompt) {
+    codexPrompt.value = masterAppState.codexDraft;
+    codexPrompt.addEventListener("input", event => {
+      masterAppState.codexDraft = event.target.value;
+    });
+  }
+
+  const codexWorkspace = document.getElementById("codex-workspace");
+  if (codexWorkspace) {
+    codexWorkspace.value = masterAppState.codexSelectedWorkspace;
+    codexWorkspace.addEventListener("change", event => {
+      masterAppState.codexSelectedWorkspace = event.target.value;
+      renderCodexUi();
+    });
+  }
+
+  const codexMode = document.getElementById("codex-mode");
+  if (codexMode) {
+    codexMode.value = masterAppState.codexSelectedMode || "auto";
+    codexMode.addEventListener("change", event => {
+      masterAppState.codexSelectedMode = event.target.value || "auto";
+      renderCodexUi();
+    });
+  }
+
+  const codexModel = document.getElementById("codex-model");
+  if (codexModel) {
+    codexModel.value = masterAppState.codexSelectedModel;
+    codexModel.addEventListener("change", async event => {
+      masterAppState.codexSelectedModel = event.target.value;
+      renderCodexUi();
+      await updateCodexModel(event.target.value);
+    });
+  }
+
+  const codexForm = document.getElementById("codex-form");
+  if (codexForm) {
+    codexForm.addEventListener("submit", async event => {
+      event.preventDefault();
+      await submitCodexPrompt();
+    });
+  }
+
+  document.querySelectorAll("[data-codex-chat-id]").forEach(button => {
+    button.addEventListener("click", () => {
+      masterAppState.codexSelectedChatId = button.dataset.codexChatId || "";
+      masterAppState.codexRecentsOpen = false;
+      renderCodexUi();
+    });
+  });
+
+  document.querySelectorAll("[data-codex-toggle-recents]").forEach(element => {
+    element.addEventListener("toggle", event => {
+      masterAppState.codexRecentsOpen = !!event.target.open;
+    });
+  });
+
+  document.querySelectorAll("[data-codex-toggle-details]").forEach(button => {
+    button.addEventListener("click", () => {
+      masterAppState.codexDetailsOpen = !masterAppState.codexDetailsOpen;
+      renderCodexUi();
+    });
+  });
+
+  document.querySelectorAll("[data-codex-approval]").forEach(button => {
+    button.addEventListener("click", async () => {
+      await resolveCodexApproval(button.dataset.codexApproval || "");
+    });
+  });
+
+  document.querySelectorAll("[data-codex-stop]").forEach(button => {
+    button.addEventListener("click", async () => {
+      await stopCodexSession();
+    });
+  });
+
+  document.querySelectorAll("[data-codex-new-session]").forEach(button => {
+    button.addEventListener("click", async () => {
+      await startNewCodexSession();
+    });
+  });
 }
 
 function setTab(tab) {
@@ -243,7 +403,7 @@ function SettingsSheet() {
           <summary>Logs</summary>
           <div class="settings-group-body">
             <div class="log-actions">
-              ${["app", "tunnel", "packages", "ui"].map(name => `
+              ${["app", "tunnel", "packages", "ui", "codex"].map(name => `
                 <button class="log-button ${masterAppState.latestLogName === name ? "is-active" : ""}" type="button" data-log-name="${name}">${escapeHtml(name)}</button>
               `).join("")}
             </div>
@@ -259,14 +419,15 @@ function BottomNav() {
   const items = [
     { id: "dashboard", label: "Dashboard", icon: "home" },
     { id: "library", label: "Library", icon: "library" },
-    { id: "store", label: "Store", icon: "store" }
+    { id: "store", label: "Store", icon: "store" },
+    { id: "codex", label: "Codex", icon: "chat" }
   ];
 
   return `
     <nav class="bottom-nav" aria-label="Bottom navigation">
       ${items.map(item => `
         <button class="tab-button ${masterAppState.currentTab === item.id ? "is-active" : ""}" type="button" data-tab="${item.id}">
-          ${icon(item.icon)}
+          <span class="tab-button-icon" aria-hidden="true">${icon(item.icon)}</span>
           <span class="tab-label">${escapeHtml(item.label)}</span>
         </button>
       `).join("")}
@@ -284,9 +445,6 @@ function renderDashboardPage() {
         <div>
           <h2 class="page-title">Dashboard</h2>
           <p class="page-subtitle">Runtime, tunnel, and installs at a glance.</p>
-        </div>
-        <div class="page-tools">
-          <button class="search-button" type="button" aria-label="Refresh" onclick="refreshAll()">${iconWrap(icon("refresh"))}</button>
         </div>
       </div>
 
@@ -346,7 +504,7 @@ function renderLibraryPage() {
 
       <div class="section-head">
         <h3 class="section-title">Installed apps</h3>
-        <button class="icon-button" type="button" aria-label="Rescan packages" onclick="postAction('/api/packages/rescan')">${iconWrap(icon("plus"))}</button>
+        <button class="icon-button" type="button" aria-label="Rescan packages" onclick="postAction('/api/packages/rescan')">${iconWrap(icon("refresh"))}</button>
       </div>
       <div class="app-grid">
         ${apps.length ? apps.map(AppCard).join("") : `<div class="empty-state">No apps match this filter right now.</div>`}
@@ -379,6 +537,134 @@ function renderStorePage() {
         ${apps.length ? apps.map(renderStoreCard).join("") : `<div class="empty-state">No store apps match this filter yet.</div>`}
       </div>
     </section>
+  `;
+}
+
+function renderCodexPage() {
+  const codex = masterAppState.latestCodex;
+  const recent = (codex?.recentChats || []).filter(item => item && item.updatedAtUtc);
+  const active = codex?.activeRun || null;
+  const pendingApproval = codex?.pendingApproval || null;
+  const currentSessionId = codex?.currentSessionId || "";
+  const workspaces = codex?.configuredWorkspaces || [];
+  const models = codex?.availableModels || [];
+  const modelChoices = models.length ? models : (codex?.currentModel ? [{ slug: codex.currentModel, displayName: codex.currentModel }] : []);
+  const visibleModelChoices = modelChoices.length ? modelChoices : [{ slug: "", displayName: "Default" }];
+  const visibleWorkspaces = workspaces.length ? workspaces : [{ path: "", label: "General" }];
+  const selectedWorkspace = masterAppState.codexSelectedWorkspace || workspaces[0]?.path || "";
+  const selectedModel = masterAppState.codexSelectedModel || codex?.currentModel || modelChoices[0]?.slug || "";
+  const selectedRecent = recent.find(item => item.id === masterAppState.codexSelectedChatId)
+    || recent.find(item => item.id === currentSessionId)
+    || recent[0]
+    || null;
+  const isViewingCurrentSession = !!selectedRecent && selectedRecent.id === currentSessionId;
+  const isBusy = !!active && !isCodexRunTerminal(active.status);
+
+  return `
+    <section class="page ${masterAppState.currentTab === "codex" ? "is-active" : ""}" id="page-codex">
+      <section class="codex-phone-shell">
+        <article class="codex-chat-surface">
+          <div class="codex-chat-topbar">
+            ${renderCodexRecentsPanel(recent, selectedRecent)}
+          </div>
+          <div class="codex-chat-scroll">
+            <div class="codex-transcript">
+              ${renderCodexConversation(selectedRecent, active, pendingApproval, isViewingCurrentSession)}
+            </div>
+          </div>
+        </article>
+
+        <form id="codex-form" class="codex-composer-card codex-form codex-form--chat-first">
+          <div class="codex-composer-top">
+            <label class="codex-field codex-field--composer" for="codex-prompt">
+              <textarea id="codex-prompt" class="codex-textarea codex-textarea--chat" rows="3" placeholder="Ask Codex something..."></textarea>
+            </label>
+            <div class="codex-composer-actions">
+              <button class="secondary-button codex-new-chat-button" type="button" data-codex-new-session ${isBusy ? "disabled" : ""}>New chat</button>
+              <button class="primary-button codex-send-button" type="submit" ${isBusy ? "disabled" : ""}>Send</button>
+            </div>
+          </div>
+
+          <div class="codex-control-row">
+            <label class="codex-compact-field" for="codex-model">
+              <span class="codex-compact-label">Model</span>
+              <select id="codex-model" class="codex-select codex-select--compact">
+                ${visibleModelChoices.map(item => `
+                  <option value="${escapeAttribute(item.slug)}" ${selectedModel === item.slug ? "selected" : ""}>${escapeHtml(item.displayName || item.slug)}</option>
+                `).join("")}
+              </select>
+            </label>
+            <label class="codex-compact-field" for="codex-workspace">
+              <span class="codex-compact-label">Context</span>
+              <select id="codex-workspace" class="codex-select codex-select--compact">
+                ${visibleWorkspaces.map(item => `
+                  <option value="${escapeAttribute(item.path)}" ${selectedWorkspace === item.path ? "selected" : ""}>${escapeHtml(formatCodexContextLabel(item))}</option>
+                `).join("")}
+              </select>
+            </label>
+            <button class="secondary-button codex-compact-stop" type="button" data-codex-stop ${isBusy ? "" : "disabled"}>
+              <span class="codex-compact-label">Stop</span>
+              <span class="codex-compact-value">${isBusy ? "Running" : "Idle"}</span>
+            </button>
+          </div>
+
+          ${masterAppState.codexLastError ? `<div class="codex-error codex-error--inline">${escapeHtml(masterAppState.codexLastError)}</div>` : ""}
+        </form>
+      </section>
+    </section>
+  `;
+}
+
+function getCodexPrimaryStatus(codex, active, pendingApproval, resolutionState, probe) {
+  if (masterAppState.codexLastError) {
+    return { tone: "danger", label: "Not working", message: masterAppState.codexLastError };
+  }
+
+  if (resolutionState !== "ready") {
+    return { tone: resolutionState === "missing" ? "danger" : "warning", label: "Not ready", message: codex?.cliResolutionError || "Checking the local Codex CLI." };
+  }
+
+  if (!probe?.isReady) {
+    return { tone: probe?.lastError ? "danger" : "warning", label: "Not ready", message: probe?.lastError || "Probing Codex JSON mode." };
+  }
+
+  if (pendingApproval) {
+    return { tone: "warning", label: "Needs approval", message: pendingApproval.summary || "Codex is waiting for your approval." };
+  }
+
+  if (active?.status === "failed") {
+    return { tone: "danger", label: "Failed", message: active.failureMessage || "The last run failed." };
+  }
+
+  if (active?.status === "stopped") {
+    return { tone: "neutral", label: "Stopped", message: active.failureMessage || "Session stopped." };
+  }
+
+  if (active && !["completed", "restart-scheduled"].includes(active.status || "")) {
+    return { tone: "warning", label: "Working", message: "Codex is working on the current request." };
+  }
+
+  return {
+    tone: masterAppState.codexConnectionState === "open" ? "success" : "warning",
+    label: masterAppState.codexConnectionState === "open" ? "Ready" : "Connecting",
+    message: masterAppState.codexConnectionState === "open" ? "Local Codex session is ready." : "Trying to reconnect to Codex events."
+  };
+}
+
+function renderCodexRecentsPanel(recent, selectedRecent) {
+  return `
+    <details class="codex-recents-panel" data-codex-toggle-recents ${masterAppState.codexRecentsOpen ? "open" : ""}>
+      <summary class="codex-recents-summary">Chat history</summary>
+      <div class="codex-recents-body">
+        <div class="codex-recents-note">${recent.length ? `${recent.length} recent chats` : "No chats yet"}</div>
+        ${recent.length ? recent.map(item => `
+          <button class="codex-recent-item ${selectedRecent?.id === item.id ? "is-active" : ""}" type="button" data-codex-chat-id="${escapeAttribute(item.id)}">
+            <span class="codex-recent-title">${escapeHtml(item.title || "Untitled chat")}</span>
+            <span class="codex-recent-meta">${escapeHtml(timeAgo(item.updatedAtUtc))}</span>
+          </button>
+        `).join("") : `<div class="empty-state codex-empty-state">Recent chats will show up here.</div>`}
+      </div>
+    </details>
   `;
 }
 
@@ -433,7 +719,7 @@ function AppCard(app) {
     actions.push(`<button class="compact-action-button" type="button" ${running ? "" : "disabled"} onclick="postAction('/api/apps/${encodeURIComponent(app.id)}/stop')">Stop</button>`);
   }
 
-  actions.push(`<button class="compact-action-button" type="button" ${app.canPublish ? "" : "disabled"} onclick="exportApp('${app.id}')">${icon("export")} Export</button>`);
+  actions.push(`<button class="compact-action-button" type="button" ${app.canPublish ? "" : "disabled"} onclick="exportApp('${app.id}')">${buttonContent("Export", "export")}</button>`);
 
   return `
     <article class="app-card">
@@ -672,6 +958,301 @@ function renderIssueRows(issues) {
   `).join("");
 }
 
+function renderCodexConversation(selectedRecent, active, pendingApproval, isViewingCurrentSession) {
+  const messages = selectedRecent?.messages || [];
+  const parts = [];
+
+  if (!messages.length) {
+    if (isViewingCurrentSession && active?.prompt) {
+      parts.push(renderCodexMessage({
+        role: "user",
+        text: active.prompt
+      }));
+    } else {
+      parts.push(renderCodexWelcomeCard());
+    }
+  } else {
+    if (selectedRecent) {
+      parts.push(renderCodexSessionMarker(selectedRecent, isViewingCurrentSession));
+    }
+
+    messages.forEach(message => {
+      parts.push(renderCodexMessage(message));
+    });
+  }
+
+  if (isViewingCurrentSession) {
+    if (pendingApproval) {
+      parts.push(renderCodexApprovalCard(pendingApproval));
+    }
+    parts.push(renderCodexProcessing(active, pendingApproval));
+  }
+
+  return parts.join("");
+}
+
+function renderCodexWelcomeCard() {
+  return `
+    <article class="codex-message-card codex-message-card--preview codex-message-card--hint">
+      <div class="codex-message-meta">
+        <span>Start here</span>
+      </div>
+      <div class="codex-message-assistant">Type a request below and your reply will appear here.</div>
+    </article>
+  `;
+}
+
+function renderCodexSessionMarker(session, isViewingCurrentSession) {
+  return `
+    <article class="codex-message-card codex-message-card--preview codex-history-preview">
+      <div class="codex-history-preview-head">
+        <div>
+          <div class="codex-message-meta">
+            <span>${isViewingCurrentSession ? "Current session" : "From chat history"}</span>
+          </div>
+          <h3 class="section-title">${escapeHtml(session.title || "Untitled chat")}</h3>
+        </div>
+        <div class="codex-history-preview-meta">${escapeHtml(timeAgo(session.updatedAtUtc))}</div>
+      </div>
+    </article>
+  `;
+}
+
+function renderCodexMessage(message) {
+  const role = (message?.role || "assistant").toLowerCase();
+  const text = message?.text || "";
+  const status = (message?.status || "completed").toLowerCase();
+  const cardClass = role === "user"
+    ? "codex-message-card codex-message-card--user"
+    : status === "failed" || status === "stopped"
+      ? "codex-message-card codex-message-card--assistant codex-message-card--failure"
+      : "codex-message-card codex-message-card--assistant";
+
+  return `
+    <article class="${cardClass}">
+      ${role === "assistant" && status !== "completed" ? `<div class="codex-message-meta"><span>${escapeHtml(status)}</span></div>` : ""}
+      <div class="${role === "user" ? "codex-message-user" : "codex-message-assistant"}">${escapeHtml(text)}</div>
+    </article>
+  `;
+}
+
+function renderCodexProcessing(active, pendingApproval) {
+  if (!active || pendingApproval || isCodexRunTerminal(active.status)) {
+    return "";
+  }
+
+  return `
+    <article class="codex-message-card codex-message-card--assistant codex-message-card--processing">
+      <div class="codex-message-meta">
+        <span>Working on it</span>
+      </div>
+      <div class="codex-processing">
+        <span class="codex-spinner" aria-hidden="true"></span>
+        <span>Processing...</span>
+      </div>
+    </article>
+  `;
+}
+
+function renderCodexApprovalCard(approval) {
+  if (!approval) {
+    return "";
+  }
+
+  return `
+    <article class="codex-message-card codex-message-card--approval">
+      <div class="codex-message-meta">
+        <span>Needs your permission</span>
+      </div>
+      <div class="codex-approval-copy">${escapeHtml(approval.summary || "Codex wants to continue with the next step.")}</div>
+      ${approval.command ? `<pre class="codex-command-preview">${escapeHtml(approval.command || "")}</pre>` : ""}
+      <div class="codex-form-actions">
+        <button class="primary-button" type="button" data-codex-approval="approve">Continue</button>
+        <button class="secondary-button" type="button" data-codex-approval="reject">Not now</button>
+      </div>
+    </article>
+  `;
+}
+
+function renderCodexFinalResponse(active) {
+  if (!active) {
+    return "";
+  }
+
+  if (active.status === "stopped") {
+    return `
+      <article class="codex-message-card codex-message-card--assistant codex-message-card--failure">
+        <div class="codex-message-meta">
+          <span>Stopped</span>
+        </div>
+        <div class="codex-message-assistant">${escapeHtml(active.failureMessage || "The session was stopped before Codex returned a final answer.")}</div>
+      </article>
+    `;
+  }
+
+  if (active.status === "failed") {
+    return `
+      <article class="codex-message-card codex-message-card--assistant codex-message-card--failure">
+        <div class="codex-message-meta">
+          <span>Failed</span>
+        </div>
+        <div class="codex-message-assistant">${escapeHtml(active.failureMessage || "The run failed before Codex returned a final answer.")}</div>
+      </article>
+    `;
+  }
+
+  if (!active.responseText) {
+    return "";
+  }
+
+  return `
+    <article class="codex-message-card codex-message-card--assistant">
+      <div class="codex-message-assistant">${escapeHtml(active.responseText || "")}</div>
+    </article>
+  `;
+}
+
+function formatCodexContextLabel(workspace) {
+  const raw = (workspace?.label || trimPath(workspace?.path || "") || "General").trim();
+  if (!raw) {
+    return "General";
+  }
+
+  if (/masterapp/i.test(raw)) {
+    return "MasterApp";
+  }
+
+  if (/apps?/i.test(raw)) {
+    return "Installed apps";
+  }
+
+  return raw
+    .replace(/[-_]+/g, " ")
+    .replace(/\b\w/g, character => character.toUpperCase());
+}
+
+function renderCodexSummaryChips(active) {
+  if (!active) {
+    return "";
+  }
+
+  const chips = [];
+  const taskModeChip = getCodexTaskModeChip(active);
+  if (taskModeChip) {
+    chips.push(StatusChip(taskModeChip.label, taskModeChip.tone));
+  }
+  if (active.changedFiles?.length) {
+    chips.push(StatusChip(`${active.changedFiles.length} files changed`, "neutral"));
+  }
+  if (active.buildResult?.status && active.buildResult.status !== "not-requested") {
+    chips.push(StatusChip(active.buildResult.success ? "Build passed" : active.buildResult.status === "running" ? "Build running" : "Build failed", active.buildResult.success ? "success" : active.buildResult.status === "running" ? "warning" : "danger"));
+  }
+  if (active.restartStatus?.status) {
+    chips.push(StatusChip(active.restartStatus.status === "scheduled" || active.restartStatus.status === "launched" ? "Restart scheduled" : "Restart failed", active.restartStatus.status === "scheduled" || active.restartStatus.status === "launched" ? "success" : "danger"));
+  }
+
+  return chips.length ? `<div class="codex-chip-row codex-chip-row--summary">${chips.join("")}</div>` : "";
+}
+
+function getCodexTaskModeChip(active) {
+  if (!active?.taskMode) {
+    return null;
+  }
+
+  const label = formatCodexModeLabel(active.taskMode);
+  const source = active.taskModeSource === "manual"
+    ? "manual"
+    : active.taskModeConfidence > 0
+      ? `auto ${Math.round(active.taskModeConfidence * 100)}%`
+      : "auto";
+
+  return {
+    label: `${label} mode (${source})`,
+    tone: active.taskModeSource === "manual" ? "success" : "neutral"
+  };
+}
+
+function formatCodexTaskMode(active) {
+  return active?.taskMode ? formatCodexModeLabel(active.taskMode) : "-";
+}
+
+function formatCodexTaskModeSource(active) {
+  if (!active?.taskModeSource) {
+    return "-";
+  }
+
+  return active.taskModeSource === "manual" ? "Manual override" : "Auto";
+}
+
+function formatCodexTaskModeConfidence(active) {
+  return typeof active?.taskModeConfidence === "number" && active.taskModeConfidence > 0
+    ? `${Math.round(active.taskModeConfidence * 100)}%`
+    : "-";
+}
+
+function formatCodexModeLabel(mode) {
+  switch ((mode || "").toLowerCase()) {
+    case "action":
+      return "Action";
+    case "investigate":
+      return "Investigate";
+    case "code":
+      return "Code";
+    case "ask":
+      return "Ask";
+    default:
+      return "Auto";
+  }
+}
+
+function renderCodexDetail(label, value) {
+  return `
+    <div class="detail-row">
+      <span class="field-label">${escapeHtml(label)}</span>
+      <span class="value">${escapeHtml(value)}</span>
+    </div>
+  `;
+}
+
+function renderCodexList(items, emptyMessage) {
+  if (!items || !items.length) {
+    return `<div class="empty-state">${escapeHtml(emptyMessage)}</div>`;
+  }
+
+  return `
+    <div class="codex-bullet-list">
+      ${items.map(item => `<div class="codex-bullet-item">${escapeHtml(item)}</div>`).join("")}
+    </div>
+  `;
+}
+
+function renderBuildAndRestart(active, lastRelaunch) {
+  const build = active?.buildResult;
+  const restart = active?.restartStatus || lastRelaunch;
+  const rows = [
+    { label: "Task mode", value: formatCodexTaskMode(active) },
+    { label: "Mode source", value: formatCodexTaskModeSource(active) },
+    { label: "Mode confidence", value: formatCodexTaskModeConfidence(active) },
+    { label: "Build status", value: build?.status || "Not requested" },
+    { label: "Build summary", value: build?.summary || "-" },
+    { label: "Restart status", value: restart?.status || "Not requested" },
+    { label: "Restart message", value: restart?.message || "-" },
+    { label: "Backup", value: restart?.backupDirectory || "-" }
+  ];
+
+  return `<div class="details-grid">${renderDetailRows(rows)}</div>`;
+}
+
+function getCodexConnectionLabel() {
+  if (masterAppState.codexConnectionState === "open") {
+    return "Live";
+  }
+  if (masterAppState.codexConnectionState === "error") {
+    return "Offline";
+  }
+  return "Connecting";
+}
+
 function getRecentActivities() {
   const latestByApp = new Map();
 
@@ -732,12 +1313,35 @@ function getStoreSubtitle(app) {
   return app.runState?.isRunning ? "Open the live app." : "Ready to launch when you are.";
 }
 
+function getDefaultCodexModes() {
+  return [
+    { slug: "auto", displayName: "Auto" },
+    { slug: "action", displayName: "Action" },
+    { slug: "investigate", displayName: "Investigate" },
+    { slug: "code", displayName: "Code" },
+    { slug: "ask", displayName: "Ask" }
+  ];
+}
+
 async function getJson(url) {
   const response = await fetch(url, { cache: "no-store" });
   if (!response.ok) {
     throw new Error(`${response.status} ${response.statusText}`);
   }
   return response.json();
+}
+
+async function postJson(url, body) {
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body || {})
+  });
+  const data = await response.json();
+  if (!response.ok || data.ok === false) {
+    throw new Error(data.message || `${response.status} ${response.statusText}`);
+  }
+  return data;
 }
 
 async function postAction(url) {
@@ -765,6 +1369,18 @@ async function refreshApps() {
   }
 }
 
+async function refreshCodex() {
+  try {
+    const codex = await getJson("/api/codex");
+    if (setLatestCodex(codex)) {
+      renderCodexUi();
+    }
+  } catch (error) {
+    masterAppState.codexLastError = error.message;
+    renderCodexUi();
+  }
+}
+
 async function loadLog(name) {
   try {
     const data = await getJson(`/api/logs/${name}?lines=200`);
@@ -787,15 +1403,17 @@ function openPublic() {
 
 async function refreshAll() {
   try {
-    const [status, apps] = await Promise.all([
+    const [status, apps, codex] = await Promise.all([
       getJson("/api/status"),
-      getJson("/api/apps")
+      getJson("/api/apps"),
+      getJson("/api/codex").catch(() => masterAppState.latestCodex || null)
     ]);
 
     const statusChanged = setLatestStatus(status);
     const appsChanged = setLatestApps(normalizeApps(apps));
-    if (statusChanged || appsChanged) {
-      renderAppShell();
+    const codexChanged = codex ? setLatestCodex(codex) : false;
+    if (statusChanged || appsChanged || codexChanged) {
+      codexChanged && !statusChanged && !appsChanged ? renderCodexUi() : renderAppShell();
     }
   } catch (error) {
     masterAppState.latestStatus = {
@@ -809,6 +1427,144 @@ async function refreshAll() {
     masterAppState.latestStatusKey = serializeValue(masterAppState.latestStatus);
     masterAppState.latestLogText = error.message;
     renderAppShell();
+  }
+}
+
+async function submitCodexPrompt() {
+  const prompt = masterAppState.codexDraft.trim();
+  if (!prompt) {
+    masterAppState.codexLastError = "Enter a prompt first.";
+    renderCodexUi();
+    return;
+  }
+
+  const workspacePath = masterAppState.codexSelectedWorkspace || masterAppState.latestCodex?.configuredWorkspaces?.[0]?.path || "";
+  const model = masterAppState.codexSelectedModel || masterAppState.latestCodex?.currentModel || "";
+  const mode = masterAppState.codexSelectedMode || "auto";
+  const optimisticRun = {
+    id: `pending-${Date.now()}`,
+    prompt,
+    requestedMode: mode,
+    taskMode: mode === "auto" ? "" : mode,
+    taskModeSource: mode === "auto" ? "auto" : "manual",
+    taskModeConfidence: mode === "auto" ? 0 : 1,
+    workspacePath,
+    model,
+    status: "processing",
+    responseText: "",
+    changedFiles: [],
+    approvalHistory: [],
+    buildResult: null,
+    restartStatus: null,
+    logLines: [],
+    startedAtUtc: new Date().toISOString()
+  };
+
+  try {
+    masterAppState.codexLastError = "";
+    masterAppState.codexSelectedChatId = "";
+    setLatestCodex({
+      ...(masterAppState.latestCodex || {}),
+      activeRun: optimisticRun,
+      pendingApproval: null
+    });
+    renderCodexUi();
+
+    const result = await postJson("/api/codex/messages", {
+      prompt,
+      workspacePath,
+      model,
+      mode
+    });
+    if (result?.run) {
+      setLatestCodex({
+        ...(masterAppState.latestCodex || {}),
+        activeRun: result.run,
+        pendingApproval: null
+      });
+    }
+    masterAppState.codexDraft = "";
+    renderCodexUi();
+    void refreshCodex();
+  } catch (error) {
+    masterAppState.codexLastError = error.message;
+    setLatestCodex({
+      ...(masterAppState.latestCodex || {}),
+      activeRun: {
+        ...optimisticRun,
+        status: "failed",
+        failureMessage: error.message
+      }
+    });
+    renderCodexUi();
+  }
+}
+
+async function updateCodexModel(model) {
+  if (!model) {
+    return;
+  }
+
+  try {
+    masterAppState.codexLastError = "";
+    await postJson("/api/codex/model", { model });
+    await refreshCodex();
+  } catch (error) {
+    masterAppState.codexLastError = error.message;
+    renderCodexUi();
+  }
+}
+
+async function resolveCodexApproval(decision) {
+  const approval = masterAppState.latestCodex?.pendingApproval;
+  if (!approval) {
+    return;
+  }
+
+  try {
+    masterAppState.codexLastError = "";
+    await postJson("/api/codex/approval", {
+      runId: approval.runId,
+      approvalId: approval.id,
+      decision
+    });
+    await refreshCodex();
+  } catch (error) {
+    masterAppState.codexLastError = error.message;
+    renderCodexUi();
+  }
+}
+
+async function stopCodexSession() {
+  const active = masterAppState.latestCodex?.activeRun;
+  if (!active || isCodexRunTerminal(active.status)) {
+    return;
+  }
+
+  try {
+    masterAppState.codexLastError = "";
+    await postJson("/api/codex/stop", { runId: active.id });
+    await refreshCodex();
+  } catch (error) {
+    masterAppState.codexLastError = error.message;
+    renderCodexUi();
+  }
+}
+
+async function startNewCodexSession() {
+  const active = masterAppState.latestCodex?.activeRun;
+
+  try {
+    masterAppState.codexLastError = "";
+    await postJson("/api/codex/session/new", { runId: active?.id || "" });
+    masterAppState.codexDraft = "";
+    masterAppState.codexSelectedChatId = "";
+    masterAppState.codexRecentsOpen = false;
+    renderCodexUi();
+    await refreshCodex();
+  } catch (error) {
+    masterAppState.codexLastError = error.message;
+    renderCodexUi();
   }
 }
 
@@ -854,6 +1610,103 @@ function setLatestLog(name, text) {
   masterAppState.latestLogText = text;
   masterAppState.latestLogKey = key;
   return true;
+}
+
+function setLatestCodex(codex) {
+  const normalized = normalizeCodex(codex);
+  const key = serializeValue(normalized);
+  if (key === masterAppState.latestCodexKey) {
+    masterAppState.latestCodex = normalized;
+    if (!masterAppState.codexSelectedWorkspace && normalized.configuredWorkspaces?.length) {
+      masterAppState.codexSelectedWorkspace = normalized.configuredWorkspaces[0].path;
+    }
+    if (!masterAppState.codexSelectedModel && normalized.currentModel) {
+      masterAppState.codexSelectedModel = normalized.currentModel;
+    }
+    if (masterAppState.codexSelectedChatId && normalized.recentChats?.length && !normalized.recentChats.some(item => item.id === masterAppState.codexSelectedChatId)) {
+      masterAppState.codexSelectedChatId = "";
+    }
+    if (!masterAppState.codexSelectedChatId && normalized.currentSessionId && normalized.recentChats?.some(item => item.id === normalized.currentSessionId)) {
+      masterAppState.codexSelectedChatId = normalized.currentSessionId;
+    }
+    return false;
+  }
+
+  masterAppState.latestCodex = normalized;
+  masterAppState.latestCodexKey = key;
+  if (!masterAppState.codexSelectedWorkspace && normalized.configuredWorkspaces?.length) {
+    masterAppState.codexSelectedWorkspace = normalized.configuredWorkspaces[0].path;
+  }
+  if (!masterAppState.codexSelectedModel && normalized.currentModel) {
+    masterAppState.codexSelectedModel = normalized.currentModel;
+  }
+  if (masterAppState.codexSelectedChatId && normalized.recentChats?.length && !normalized.recentChats.some(item => item.id === masterAppState.codexSelectedChatId)) {
+    masterAppState.codexSelectedChatId = "";
+  }
+  if (!masterAppState.codexSelectedChatId && normalized.currentSessionId && normalized.recentChats?.some(item => item.id === normalized.currentSessionId)) {
+    masterAppState.codexSelectedChatId = normalized.currentSessionId;
+  }
+  return true;
+}
+
+function normalizeCodex(codex) {
+  return {
+    ...(codex || {}),
+    availableModes: codex?.availableModes || getDefaultCodexModes(),
+    configuredWorkspaces: codex?.configuredWorkspaces || [],
+    availableModels: codex?.availableModels || [],
+    recentChats: codex?.recentChats || [],
+    currentSessionId: codex?.currentSessionId || "",
+    activeRun: codex?.activeRun || null,
+    pendingApproval: codex?.pendingApproval || null,
+    currentModel: codex?.currentModel || "",
+    autoApproveReadOnlyCommands: !!codex?.autoApproveReadOnlyCommands,
+    cliProbe: codex?.cliProbe || null,
+    lastRelaunch: codex?.lastRelaunch || null
+  };
+}
+
+function isCodexRunTerminal(status) {
+  return ["completed", "failed", "restart-scheduled", "stopped"].includes((status || "").toLowerCase());
+}
+
+function connectCodexEvents() {
+  if (masterAppState.codexEventSource) {
+    return;
+  }
+
+  const source = new EventSource("/api/codex/events");
+  masterAppState.codexEventSource = source;
+
+  source.onopen = () => {
+    masterAppState.codexConnectionState = "open";
+    renderCodexUi();
+  };
+
+  source.onerror = () => {
+    masterAppState.codexConnectionState = "error";
+    renderCodexUi();
+  };
+
+  source.onmessage = event => {
+    try {
+      const message = JSON.parse(event.data);
+      applyCodexEvent(message);
+    } catch (error) {
+      masterAppState.codexLastError = error.message;
+      renderCodexUi();
+    }
+  };
+}
+
+function applyCodexEvent(message) {
+  const { type, payload } = message || {};
+  if (type === "codex.snapshot") {
+    if (setLatestCodex(payload)) {
+      renderCodexUi();
+    }
+    return;
+  }
 }
 
 function serializeValue(value) {
@@ -958,13 +1811,50 @@ async function deleteApp(appId) {
 
   await postAction(`/api/apps/${encodeURIComponent(appId)}/delete`);
 }
-function icon(name) {
-  const path = iconPaths[name] || iconPaths.globe;
-  return `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="${path}" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"></path></svg>`;
+
+function ensureIconSprite() {
+  if (document.getElementById(ICON_SPRITE_ID)) {
+    return;
+  }
+
+  const sprite = document.createElement("svg");
+  sprite.id = ICON_SPRITE_ID;
+  sprite.className = "app-icon-sprite";
+  sprite.setAttribute("aria-hidden", "true");
+  sprite.setAttribute("focusable", "false");
+  sprite.innerHTML = `
+    <defs>
+      ${Object.entries(iconPaths).map(([name, path]) => `
+        <symbol id="${getIconId(name)}" viewBox="0 0 24 24">
+          <path d="${path}" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round"></path>
+        </symbol>
+      `).join("")}
+    </defs>
+  `;
+  document.body.prepend(sprite);
+}
+
+function getIconId(name) {
+  return `app-icon-${name}`;
+}
+
+function icon(name, className = "") {
+  const iconName = iconPaths[name] ? name : "globe";
+  const classAttribute = className ? ` ${className}` : "";
+  return `<svg class="app-icon${classAttribute}" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><use href="#${getIconId(iconName)}"></use></svg>`;
 }
 
 function iconWrap(inner) {
   return `<span class="icon-wrap">${inner}</span>`;
+}
+
+function buttonContent(label, iconName) {
+  return `
+    <span class="button-content">
+      ${iconName ? `<span class="button-icon" aria-hidden="true">${icon(iconName)}</span>` : ""}
+      <span class="button-label">${escapeHtml(label)}</span>
+    </span>
+  `;
 }
 
 function statusDot(tone) {
@@ -977,7 +1867,13 @@ function timeAgo(value) {
     return "just now";
   }
 
-  const seconds = Math.max(0, Math.round((Date.now() - new Date(value).getTime()) / 1000));
+  const parsed = new Date(value);
+  const timestamp = parsed.getTime();
+  if (!Number.isFinite(timestamp)) {
+    return "recently";
+  }
+
+  const seconds = Math.max(0, Math.round((Date.now() - timestamp) / 1000));
   if (seconds < 60) return `${seconds || 1}s ago`;
   const minutes = Math.round(seconds / 60);
   if (minutes < 60) return `${minutes}m ago`;
@@ -992,12 +1888,17 @@ function formatDateTime(value) {
     return "-";
   }
 
+  const parsed = new Date(value);
+  if (!Number.isFinite(parsed.getTime())) {
+    return "-";
+  }
+
   return new Intl.DateTimeFormat(undefined, {
     month: "short",
     day: "numeric",
     hour: "numeric",
     minute: "2-digit"
-  }).format(new Date(value));
+  }).format(parsed);
 }
 
 function formatShortDate(value) {
@@ -1036,6 +1937,7 @@ function escapeAttribute(value) {
 
 window.postAction = postAction;
 window.refreshAll = refreshAll;
+window.refreshCodex = refreshCodex;
 window.openPublic = openPublic;
 window.loadLog = loadLog;
 window.exportApp = exportApp;

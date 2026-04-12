@@ -13,6 +13,8 @@ using Microsoft.AspNetCore.StaticFiles;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Primitives;
+using MasterApp.Storage;
+using System.Diagnostics;
 using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Text;
@@ -28,6 +30,7 @@ public sealed class MasterAppRuntime : IDisposable
     private readonly PackageWatcherService _packageWatcher;
     private readonly AppProcessManager _appProcessManager;
     private readonly TunnelManager _tunnelManager;
+    private readonly CodexBrokerService _codexService;
     private readonly HttpClient _proxyClient;
     private readonly FileExtensionContentTypeProvider _contentTypes = new();
     private readonly object _gate = new();
@@ -43,6 +46,7 @@ public sealed class MasterAppRuntime : IDisposable
         _packageWatcher = new PackageWatcherService(_packageManager, _context.Log, _context.Settings.PackageScanIntervalSeconds);
         _appProcessManager = new AppProcessManager(_context);
         _tunnelManager = new TunnelManager(_context);
+        _codexService = new CodexBrokerService(_context, this);
         _proxyClient = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false }, disposeHandler: true);
     }
 
@@ -136,6 +140,17 @@ public sealed class MasterAppRuntime : IDisposable
     public OperationResult StopTunnel() => _tunnelManager.Stop();
     public OperationResult RestartTunnel() => _tunnelManager.Restart();
     public Task<OperationResult> RescanPackagesAsync() => _packageWatcher.ScanNowAsync("manual");
+    public object GetCodexResponse() => _codexService.GetDashboardResponse();
+    public Task<CodexChatRun> StartCodexRunAsync(CodexBrokerService.CodexChatRequest request, CancellationToken cancellationToken = default)
+        => _codexService.StartRunAsync(request, cancellationToken);
+    public Task<CodexChatRun> StopCodexRunAsync(CodexBrokerService.CodexStopRequest request, CancellationToken cancellationToken = default)
+        => _codexService.StopRunAsync(request, cancellationToken);
+    public Task ClearCodexSessionAsync(CodexBrokerService.CodexNewSessionRequest request, CancellationToken cancellationToken = default)
+        => _codexService.ClearSessionAsync(request, cancellationToken);
+    public Task SetCodexModelAsync(CodexBrokerService.CodexModelRequest request, CancellationToken cancellationToken = default)
+        => _codexService.SetModelAsync(request, cancellationToken);
+    public Task<CodexChatRun> ResolveCodexApprovalAsync(CodexBrokerService.CodexApprovalDecisionRequest request, CancellationToken cancellationToken = default)
+        => _codexService.ResolveApprovalAsync(request, cancellationToken);
     public async Task<OperationResult> StartAppAsync(string appId)
     {
         try
@@ -255,6 +270,10 @@ public sealed class MasterAppRuntime : IDisposable
             publishedFolder = _context.Settings.PublishedFolder,
             autoStartTunnel = _context.Settings.AutoStartTunnel,
             logLevel = _context.Settings.LogLevel,
+            codexCommand = _context.Settings.CodexCommand,
+            workspacePaths = _context.Settings.WorkspacePaths,
+            preferredBuildCommand = _context.Settings.PreferredBuildCommand,
+            preferredRestartCommand = _context.Settings.PreferredRestartCommand,
             publicHostname = _context.Secrets.PublicHostname,
             localPort = _context.Secrets.LocalPort,
             tokenPresent = !string.IsNullOrWhiteSpace(_context.Secrets.CloudflareTunnelToken) &&
@@ -294,6 +313,7 @@ public sealed class MasterAppRuntime : IDisposable
             "tunnel" => LogKind.Tunnel,
             "packages" => LogKind.Packages,
             "ui" => LogKind.Ui,
+            "codex" => LogKind.Codex,
             _ => LogKind.App
         };
 
@@ -422,7 +442,19 @@ public sealed class MasterAppRuntime : IDisposable
         defaultFiles.DefaultFileNames.Clear();
         defaultFiles.DefaultFileNames.Add("dashboard.html");
         app.UseDefaultFiles(defaultFiles);
-        app.UseStaticFiles();
+        app.UseStaticFiles(new StaticFileOptions
+        {
+            OnPrepareResponse = context =>
+            {
+                var fileName = Path.GetFileName(context.File.Name);
+                if (fileName is "masterapp-ui.js" or "masterapp-ui.css" or "dashboard.html" or "index.html" or "store.html")
+                {
+                    context.Context.Response.Headers["Cache-Control"] = "no-cache, no-store, must-revalidate";
+                    context.Context.Response.Headers["Pragma"] = "no-cache";
+                    context.Context.Response.Headers["Expires"] = "0";
+                }
+            }
+        });
 
         app.MapGet("/healthz", () =>
         {
@@ -478,6 +510,93 @@ public sealed class MasterAppRuntime : IDisposable
             return Results.Json(GetLogsResponse(name, lines ?? 200));
         });
 
+        app.MapGet("/api/codex", () =>
+        {
+            _context.Log.Ui("Api", "GET /api/codex");
+            return Results.Json(GetCodexResponse());
+        });
+
+        app.MapGet("/api/codex/events", async (HttpContext context) =>
+        {
+            _context.Log.Ui("Api", "GET /api/codex/events");
+            await WriteCodexEventsAsync(context);
+        });
+
+        app.MapPost("/api/codex/messages", async (CodexBrokerService.CodexChatRequest request, HttpContext context) =>
+        {
+            _context.Log.Ui("Api", "POST /api/codex/messages");
+            if (string.IsNullOrWhiteSpace(request.Prompt))
+            {
+                return Results.BadRequest(new { ok = false, message = "Prompt is required." });
+            }
+
+            try
+            {
+                var run = await StartCodexRunAsync(request, context.RequestAborted);
+                return Results.Json(new { ok = true, run });
+            }
+            catch (Exception ex)
+            {
+                return Results.BadRequest(new { ok = false, message = ex.Message });
+            }
+        });
+
+        app.MapPost("/api/codex/model", async (CodexBrokerService.CodexModelRequest request, HttpContext context) =>
+        {
+            _context.Log.Ui("Api", "POST /api/codex/model");
+            try
+            {
+                await SetCodexModelAsync(request, context.RequestAborted);
+                return Results.Json(new { ok = true });
+            }
+            catch (Exception ex)
+            {
+                return Results.BadRequest(new { ok = false, message = ex.Message });
+            }
+        });
+
+        app.MapPost("/api/codex/stop", async (CodexBrokerService.CodexStopRequest request, HttpContext context) =>
+        {
+            _context.Log.Ui("Api", "POST /api/codex/stop");
+            try
+            {
+                var run = await StopCodexRunAsync(request, context.RequestAborted);
+                return Results.Json(new { ok = true, run });
+            }
+            catch (Exception ex)
+            {
+                return Results.BadRequest(new { ok = false, message = ex.Message });
+            }
+        });
+
+        app.MapPost("/api/codex/session/new", async (CodexBrokerService.CodexNewSessionRequest request, HttpContext context) =>
+        {
+            _context.Log.Ui("Api", "POST /api/codex/session/new");
+            try
+            {
+                await ClearCodexSessionAsync(request, context.RequestAborted);
+                return Results.Json(new { ok = true });
+            }
+            catch (Exception ex)
+            {
+                return Results.BadRequest(new { ok = false, message = ex.Message });
+            }
+        });
+
+        app.MapPost("/api/codex/approval", async (CodexBrokerService.CodexApprovalDecisionRequest request, HttpContext context) =>
+        {
+            _context.Log.Ui("Api", "POST /api/codex/approval");
+            try
+            {
+                var run = await ResolveCodexApprovalAsync(request, context.RequestAborted);
+                return Results.Json(new { ok = true, run });
+            }
+            catch (Exception ex)
+            {
+                return Results.BadRequest(new { ok = false, message = ex.Message });
+            }
+        });
+
         app.MapGet("/api/phone-qr.svg", () =>
         {
             _context.Log.Ui("Api", "GET /api/phone-qr.svg");
@@ -525,6 +644,80 @@ public sealed class MasterAppRuntime : IDisposable
             {
                 destination.Content.Headers.TryAddWithoutValidation(header.Key, header.Value.ToArray());
             }
+        }
+    }
+
+    public async Task WriteCodexEventsAsync(HttpContext context)
+    {
+        context.Response.Headers.ContentType = "text/event-stream";
+        context.Response.Headers.CacheControl = "no-cache";
+        context.Response.Headers.Connection = "keep-alive";
+
+        using var subscription = _codexService.Subscribe();
+
+        try
+        {
+            while (await subscription.Reader.WaitToReadAsync(context.RequestAborted))
+            {
+                while (subscription.Reader.TryRead(out var ev))
+                {
+                    var json = JsonSerializer.Serialize(ev, MasterApp.Storage.JsonOptions.Default);
+                    await context.Response.WriteAsync($"data: {json}\n\n", context.RequestAborted);
+                    await context.Response.Body.FlushAsync(context.RequestAborted);
+                }
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // client disconnected
+        }
+    }
+
+    public Task<RelaunchStatusRecord> ScheduleSelfRelaunchAsync(string operationId, string workspacePath, string reason)
+    {
+        try
+        {
+            var backupDirectory = BackupImportantState(operationId, workspacePath);
+            var command = GetRestartCommand(workspacePath);
+            var record = new RelaunchStatusRecord
+            {
+                Status = "scheduled",
+                Message = reason,
+                BackupDirectory = backupDirectory,
+                Command = command,
+                OperationId = operationId,
+                RequestedAtUtc = DateTimeOffset.UtcNow
+            };
+
+            _context.RuntimeStateStore.SetLastRelaunch(record);
+            File.WriteAllText(_context.Paths.RelaunchStateFile, JsonSerializer.Serialize(record, MasterApp.Storage.JsonOptions.DefaultIndented));
+
+            var scriptPath = CreateRelaunchScript(record, workspacePath);
+            StartRelaunchHelper(scriptPath);
+
+            _ = Task.Run(async () =>
+            {
+                await Task.Delay(1200);
+                ExitForRelaunch();
+            });
+
+            _context.Log.Codex("Runtime", $"Scheduled self relaunch with helper script: {scriptPath}");
+            return Task.FromResult(record);
+        }
+        catch (Exception ex)
+        {
+            var failed = new RelaunchStatusRecord
+            {
+                Status = "failed",
+                Message = ex.Message,
+                OperationId = operationId,
+                RequestedAtUtc = DateTimeOffset.UtcNow,
+                CompletedAtUtc = DateTimeOffset.UtcNow
+            };
+
+            _context.RuntimeStateStore.SetLastRelaunch(failed);
+            _context.Log.Codex("Runtime", "Failed to schedule self relaunch.", ex);
+            return Task.FromResult(failed);
         }
     }
 
@@ -813,6 +1006,166 @@ public sealed class MasterAppRuntime : IDisposable
         var issues = new List<string>(_context.ValidationIssues);
 
         return issues;
+    }
+
+    private string BackupImportantState(string operationId, string workspacePath)
+    {
+        var backupDirectory = Path.Combine(
+            _context.Paths.BackupsDirectory,
+            $"{DateTimeOffset.UtcNow:yyyyMMdd-HHmmss}-{operationId[..Math.Min(8, operationId.Length)]}");
+        Directory.CreateDirectory(backupDirectory);
+
+        CopyFileIfPresent(_context.Paths.SettingsFile, Path.Combine(backupDirectory, "settings.json"));
+        CopyFileIfPresent(_context.Paths.SecretsFile, Path.Combine(backupDirectory, "secrets.json"));
+        CopyFileIfPresent(_context.Paths.RuntimeStateFile, Path.Combine(backupDirectory, "runtime-state.json"));
+
+        var environmentFile = Path.Combine(workspacePath, ".codex", "environments", "environment.toml");
+        if (File.Exists(environmentFile))
+        {
+            var environmentBackup = Path.Combine(backupDirectory, "workspace", ".codex", "environments", "environment.toml");
+            Directory.CreateDirectory(Path.GetDirectoryName(environmentBackup)!);
+            File.Copy(environmentFile, environmentBackup, overwrite: true);
+        }
+
+        CleanupOldBackups();
+        return backupDirectory;
+    }
+
+    private void CleanupOldBackups()
+    {
+        var retention = Math.Max(1, _context.Settings.ConfigBackupRetentionCount);
+        var directories = new DirectoryInfo(_context.Paths.BackupsDirectory)
+            .GetDirectories()
+            .OrderByDescending(directory => directory.CreationTimeUtc)
+            .ToArray();
+
+        foreach (var directory in directories.Skip(retention))
+        {
+            try
+            {
+                directory.Delete(recursive: true);
+            }
+            catch (Exception ex)
+            {
+                _context.Log.Codex("Runtime", $"Backup cleanup warning for {directory.FullName}: {ex.Message}", ex);
+            }
+        }
+    }
+
+    public string GetRestartCommand(string workspacePath)
+    {
+        if (!string.IsNullOrWhiteSpace(_context.Settings.PreferredRestartCommand))
+        {
+            return _context.Settings.PreferredRestartCommand;
+        }
+
+        var script = Path.Combine(workspacePath, "scripts", "run-masterapp.bat");
+        if (File.Exists(script))
+        {
+            return ".\\scripts\\run-masterapp.bat";
+        }
+
+        var executable = Environment.ProcessPath;
+        if (string.IsNullOrWhiteSpace(executable))
+        {
+            throw new InvalidOperationException("Could not determine a restart command for MasterApp.");
+        }
+
+        return $"\"{executable}\"";
+    }
+
+    private string CreateRelaunchScript(RelaunchStatusRecord record, string workspacePath)
+    {
+        var scriptPath = Path.Combine(_context.Paths.TempDirectory, $"masterapp-relaunch-{record.OperationId ?? Guid.NewGuid().ToString("N")}.ps1");
+        var markerPath = _context.Paths.RelaunchStateFile.Replace("'", "''");
+        var workingDirectory = workspacePath.Replace("'", "''");
+        var command = (record.Command ?? string.Empty).Replace("'", "''");
+        var backupDirectory = (record.BackupDirectory ?? string.Empty).Replace("'", "''");
+        var operationId = (record.OperationId ?? string.Empty).Replace("'", "''");
+
+        var script = $$"""
+param()
+$ErrorActionPreference = 'Continue'
+$pidToWait = {{Process.GetCurrentProcess().Id}}
+$deadline = (Get-Date).AddSeconds(45)
+while ((Get-Date) -lt $deadline) {
+  $existing = Get-Process -Id $pidToWait -ErrorAction SilentlyContinue
+  if (-not $existing) { break }
+  Start-Sleep -Milliseconds 750
+}
+if (Get-Process -Id $pidToWait -ErrorAction SilentlyContinue) {
+  Stop-Process -Id $pidToWait -Force -ErrorAction SilentlyContinue
+  Start-Sleep -Seconds 1
+}
+$launching = @{
+  status = 'launching'
+  message = 'Relaunch helper is starting MasterApp.'
+  backupDirectory = '{{backupDirectory}}'
+  command = '{{command}}'
+  operationId = '{{operationId}}'
+  requestedAtUtc = '{{record.RequestedAtUtc:O}}'
+}
+$launching | ConvertTo-Json -Compress | Set-Content -LiteralPath '{{markerPath}}' -Encoding UTF8
+Start-Process -FilePath 'cmd.exe' -ArgumentList '/c', '{{command}}' -WorkingDirectory '{{workingDirectory}}' -WindowStyle Hidden
+$launched = @{
+  status = 'launched'
+  message = 'MasterApp relaunch command started.'
+  backupDirectory = '{{backupDirectory}}'
+  command = '{{command}}'
+  operationId = '{{operationId}}'
+  requestedAtUtc = '{{record.RequestedAtUtc:O}}'
+  completedAtUtc = '{{DateTimeOffset.UtcNow:O}}'
+}
+$launched | ConvertTo-Json -Compress | Set-Content -LiteralPath '{{markerPath}}' -Encoding UTF8
+Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
+""";
+
+        File.WriteAllText(scriptPath, script, Encoding.UTF8);
+        return scriptPath;
+    }
+
+    private static void StartRelaunchHelper(string scriptPath)
+    {
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = "powershell.exe",
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            WindowStyle = ProcessWindowStyle.Hidden
+        };
+        startInfo.ArgumentList.Add("-NoProfile");
+        startInfo.ArgumentList.Add("-ExecutionPolicy");
+        startInfo.ArgumentList.Add("Bypass");
+        startInfo.ArgumentList.Add("-File");
+        startInfo.ArgumentList.Add(scriptPath);
+        Process.Start(startInfo);
+    }
+
+    private void ExitForRelaunch()
+    {
+        try
+        {
+            Dispose();
+        }
+        catch (Exception ex)
+        {
+            _context.Log.Codex("Runtime", "Dispose during relaunch failed.", ex);
+        }
+        finally
+        {
+            Environment.Exit(0);
+        }
+    }
+
+    private static void CopyFileIfPresent(string source, string destination)
+    {
+        if (!File.Exists(source))
+        {
+            return;
+        }
+
+        Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
+        File.Copy(source, destination, overwrite: true);
     }
 
 }

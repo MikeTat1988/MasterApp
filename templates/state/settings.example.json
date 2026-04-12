@@ -6,5 +6,14 @@
   "publishedFolder": "C:\\MasterApp\\Published",
   "autoStartTunnel": false,
   "logLevel": "Info",
-  "packageScanIntervalSeconds": 5
+  "packageScanIntervalSeconds": 5,
+  "codexCommand": "codex",
+  "workspacePaths": [
+    "C:\\Dev\\MasterApp"
+  ],
+  "preferredBuildCommand": "dotnet build .\\src\\MasterApp\\MasterApp.csproj -c Debug",
+  "preferredRestartCommand": ".\\scripts\\run-masterapp.bat",
+  "preferCodexJsonOutput": true,
+  "codexHistoryLimit": 8,
+  "configBackupRetentionCount": 10
 }

@@ -12,6 +12,7 @@ public static class Bootstrapper
         var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
         var root = Path.Combine(localAppData, "MasterApp");
         var state = Path.Combine(root, "State");
+        var backups = Path.Combine(state, "Backups");
         var logs = Path.Combine(root, "Logs");
         var temp = Path.Combine(root, "Temp");
         var apps = Path.Combine(root, "Apps");
@@ -19,6 +20,7 @@ public static class Bootstrapper
 
         Directory.CreateDirectory(root);
         Directory.CreateDirectory(state);
+        Directory.CreateDirectory(backups);
         Directory.CreateDirectory(logs);
         Directory.CreateDirectory(temp);
         Directory.CreateDirectory(apps);
@@ -28,13 +30,15 @@ public static class Bootstrapper
         {
             RootDirectory = root,
             StateDirectory = state,
+            BackupsDirectory = backups,
             LogsDirectory = logs,
             TempDirectory = temp,
             AppsDirectory = apps,
             AppSpecsDirectory = appSpecs,
             SettingsFile = Path.Combine(state, "settings.json"),
             SecretsFile = Path.Combine(state, "secrets.json"),
-            RuntimeStateFile = Path.Combine(state, "runtime-state.json")
+            RuntimeStateFile = Path.Combine(state, "runtime-state.json"),
+            RelaunchStateFile = Path.Combine(state, "relaunch-state.json")
         };
 
         var log = new FileLogManager(paths.LogsDirectory);
@@ -47,6 +51,7 @@ public static class Bootstrapper
             AppSettings.CreateDefault(),
             log,
             "settings.json");
+        NormalizeSettings(paths, settings, log);
 
         var secrets = LoadOrCreate(
             paths.SecretsFile,
@@ -162,6 +167,94 @@ public static class Bootstrapper
         catch (Exception ex)
         {
             log.Warn("Bootstrapper", $"Could not create directory for {label}: {path}. {ex.Message}");
+        }
+    }
+
+    private static void NormalizeSettings(AppPaths paths, AppSettings settings, FileLogManager log)
+    {
+        settings.WorkspacePaths = settings.WorkspacePaths
+            .Where(path => !string.IsNullOrWhiteSpace(path))
+            .Select(path => Path.GetFullPath(path))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        var detectedRoot = DetectWorkspaceRoot();
+        if (!string.IsNullOrWhiteSpace(detectedRoot) && !settings.WorkspacePaths.Contains(detectedRoot, StringComparer.OrdinalIgnoreCase))
+        {
+            settings.WorkspacePaths.Insert(0, detectedRoot);
+            log.Info("Bootstrapper", $"Added detected workspace path: {detectedRoot}");
+        }
+
+        if (!string.IsNullOrWhiteSpace(detectedRoot) &&
+            File.Exists(Path.Combine(detectedRoot, "src", "MasterApp", "MasterApp.csproj")))
+        {
+            if (string.IsNullOrWhiteSpace(settings.PreferredBuildCommand))
+            {
+                settings.PreferredBuildCommand = "dotnet build .\\src\\MasterApp\\MasterApp.csproj -c Debug";
+            }
+
+            if (string.IsNullOrWhiteSpace(settings.PreferredRestartCommand))
+            {
+                settings.PreferredRestartCommand = ".\\scripts\\run-masterapp.bat";
+            }
+        }
+
+        if (string.IsNullOrWhiteSpace(settings.CodexCommand))
+        {
+            settings.CodexCommand = "codex";
+        }
+
+        settings.CodexHistoryLimit = Math.Clamp(settings.CodexHistoryLimit, 1, 25);
+        settings.ConfigBackupRetentionCount = Math.Clamp(settings.ConfigBackupRetentionCount, 1, 50);
+    }
+
+    private static string? DetectWorkspaceRoot()
+    {
+        foreach (var candidate in GetCandidateRoots())
+        {
+            var current = candidate;
+            while (!string.IsNullOrWhiteSpace(current))
+            {
+                if (File.Exists(Path.Combine(current, "src", "MasterApp", "MasterApp.csproj")))
+                {
+                    return current;
+                }
+
+                var parent = Directory.GetParent(current);
+                if (parent is null)
+                {
+                    break;
+                }
+
+                current = parent.FullName;
+            }
+        }
+
+        return null;
+    }
+
+    private static IEnumerable<string> GetCandidateRoots()
+    {
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var candidates = new[]
+        {
+            AppContext.BaseDirectory,
+            Directory.GetCurrentDirectory(),
+            AppDomain.CurrentDomain.BaseDirectory
+        };
+
+        foreach (var candidate in candidates)
+        {
+            if (string.IsNullOrWhiteSpace(candidate))
+            {
+                continue;
+            }
+
+            var full = Path.GetFullPath(candidate);
+            if (seen.Add(full))
+            {
+                yield return full;
+            }
         }
     }
 
