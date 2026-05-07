@@ -112,6 +112,23 @@ Suggested local values:
 }
 ```
 
+If you need longer brokered runs in the Codex tab, add optional limits in `%LOCALAPPDATA%\\MasterApp\\State\\settings.json`:
+
+```json
+{
+  "codexMaxDecisionSteps": 20,
+  "ollamaMaxDecisionSteps": 36
+}
+```
+
+MasterApp now treats those settings as base budgets. The broker automatically increases the effective step budget for harder investigations such as:
+
+- diagnosing the main MasterApp workspace
+- working inside installed app packages
+- longer investigative or code-change prompts
+
+To help the broker converge faster, a workspace can include an optional `masterapp.ai.json` file at its root. MasterApp reads it and injects the app's own navigation hints into the broker prompt.
+
 ## Share the project
 
 Run:
@@ -149,6 +166,7 @@ The important rules to give the model are:
 
 - generate a single inbox-ready `.zip`
 - put exactly one `app.manifest.json` at the zip root
+- include `masterapp.ai.json` at the zip root whenever possible so brokered agents know where to start
 - keep all manifest paths relative
 - choose the correct package type: `static`, `portable`, or `source`
 - for EXE-based apps, bind to `MASTERAPP_PORT` and expose a health endpoint such as `/api/health`
@@ -158,6 +176,7 @@ The sample package and manifest examples are here:
 
 - `sample-package/`
 - `sample-package/app.manifest.json`
+- `sample-package/masterapp.ai.json`
 - `sample-package/portable-app.manifest.sample.json`
 - `sample-package/source-app.manifest.sample.json`
 

@@ -2,6 +2,7 @@ using MasterApp.Bootstrap;
 using MasterApp.Models;
 using MasterApp.Storage;
 using MasterApp.Utilities;
+using System.Diagnostics;
 using System.IO.Compression;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -88,6 +89,7 @@ public sealed class PackageManager
             var manifest = LoadManifest(packageRoot);
 
             ValidateManifest(manifest);
+            StopRunningAppBeforeInstall(manifest.Id);
             BuildSourcePackageIfNeeded(manifest, packageRoot);
 
             var installPath = Path.Combine(_context.Paths.AppsDirectory, manifest.Id, manifest.Version);
@@ -171,6 +173,48 @@ public sealed class PackageManager
         if (execution.ExitCode != 0)
         {
             throw new InvalidOperationException($"PACKAGE_BUILD_FAILED: {execution.StandardError}{execution.StandardOutput}");
+        }
+    }
+
+    private void StopRunningAppBeforeInstall(string appId)
+    {
+        var existing = _context.RuntimeStateStore.GetApp(appId);
+        var processId = existing?.RunState.ProcessId;
+        if (existing?.RunState.IsRunning != true || processId is null || processId <= 0)
+        {
+            return;
+        }
+
+        try
+        {
+            using var process = Process.GetProcessById(processId.Value);
+            if (process.HasExited)
+            {
+                return;
+            }
+
+            _context.Log.Packages("PackageManager", $"Stopping running app '{appId}' (PID {processId.Value}) before install.");
+            process.Kill(entireProcessTree: true);
+            process.WaitForExit(10000);
+        }
+        catch (ArgumentException)
+        {
+            // Process already exited between state read and stop attempt.
+        }
+        catch (Exception ex)
+        {
+            throw new InvalidOperationException($"APP_STOP_BEFORE_INSTALL_FAILED: {appId}. {ex.Message}", ex);
+        }
+        finally
+        {
+            _context.RuntimeStateStore.UpdateRunState(appId, new AppRunState
+            {
+                Status = "stopped",
+                IsRunning = false,
+                Message = "App stopped for reinstall.",
+                ProcessId = processId,
+                StoppedAtUtc = DateTimeOffset.UtcNow
+            });
         }
     }
 

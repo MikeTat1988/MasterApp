@@ -9,6 +9,7 @@ Produce a Windows app package that MasterApp can install from a single `.zip` dr
 MasterApp requires:
 
 - Exactly one `app.manifest.json` at the package root.
+- A root-level `masterapp.ai.json` file is strongly recommended.
 - All manifest paths to be relative.
 - A valid `id`, `name`, `version`, and `appType`.
 - A package layout that matches the declared app type.
@@ -24,6 +25,7 @@ Required structure:
 ```text
 package-root/
   app.manifest.json
+  masterapp.ai.json
   wwwroot/
     index.html
     ...
@@ -34,6 +36,7 @@ Required manifest rules:
 - `appType` must be `static`.
 - `entry` must point to a file inside `wwwroot`.
 - `launch.kind` should be `static`.
+- `icon` should point to a real app icon image such as `assets/app-icon.png`.
 
 Best when:
 
@@ -50,6 +53,7 @@ Required structure:
 ```text
 package-root/
   app.manifest.json
+  masterapp.ai.json
   dist/
     MyApp.exe
     ...
@@ -61,6 +65,7 @@ Required manifest rules:
 - `launch.kind` must be `webApp`.
 - `launch.executablePath` must point to the packaged EXE.
 - The app must answer the health endpoint declared by `launch.healthPath`.
+- `icon` should point to a real app icon image such as `assets/app-icon.png`.
 
 Best when:
 
@@ -77,6 +82,7 @@ Required structure:
 ```text
 package-root/
   app.manifest.json
+  masterapp.ai.json
   src-or-project-files...
 ```
 
@@ -86,6 +92,7 @@ Required manifest rules:
 - `build.installCommand` must fully build or publish the runnable app.
 - `launch.executablePath` must point to the built EXE produced by the install command.
 - The app must answer the health endpoint declared by `launch.healthPath`.
+- `icon` should point to a real app icon image such as `assets/app-icon.png`.
 
 Best when:
 
@@ -135,6 +142,7 @@ MasterApp will:
   "version": "1.0.0",
   "appType": "static",
   "entry": "index.html",
+  "icon": "assets/app-icon.png",
   "launch": {
     "kind": "static"
   },
@@ -146,6 +154,51 @@ MasterApp will:
 }
 ```
 
+## App icon requirements
+
+Every Store-visible app should ship a real bitmap app icon so MasterApp can show an iPhone-style Store tile instead of a generic fallback glyph.
+
+- Preferred file: `assets/app-icon.png`
+- Preferred runtime dimensions: `512x512` PNG
+- Minimum dimensions: `180x180` PNG
+- Optional source artwork: `1024x1024` PNG may be kept as `assets/app-icon-source.png`, but do not point the manifest at it because Store cards should load the lighter runtime icon.
+- Shape: square image with the full icon artwork inside it; MasterApp will apply the rounded Store-card mask
+- Avoid: text, letters, watermarks, screenshots, transparent backgrounds, and tiny symbolic-only glyphs
+- Manifest path: use only a relative path, for example `"icon": "assets/app-icon.png"`
+- Existing apps: if the app already has a suitable icon and the identity is not changing, reuse it. Do not generate a new icon every update, because that creates duplicate assets and unnecessary rewrites.
+
+## AI hints file template
+
+Add this file at `masterapp.ai.json` in the package root:
+
+```json
+{
+  "summary": "One short paragraph about what the app is and where the important code lives.",
+  "preferredEntryPoints": [
+    "app.manifest.json",
+    "wwwroot/index.html"
+  ],
+  "hotspotFiles": [
+    "wwwroot/index.html",
+    "wwwroot/app.js"
+  ],
+  "investigationHints": [
+    "For UI issues start in wwwroot.",
+    "Read app.manifest.json before changing launch behavior."
+  ],
+  "avoidPatterns": [
+    "Do not search outside the package root."
+  ]
+}
+```
+
+Keep the AI hints file short and practical:
+
+- point to the 2-8 files most likely to answer common questions
+- explain the main package shape in one paragraph
+- add one or two "read this first" hints for debugging
+- avoid generic filler or broad repository scans
+
 Runnable app template:
 
 ```json
@@ -155,6 +208,7 @@ Runnable app template:
   "name": "My App",
   "version": "1.0.0",
   "appType": "portable",
+  "icon": "assets/app-icon.png",
   "launch": {
     "kind": "webApp",
     "executablePath": "dist/MyApp.exe",
@@ -218,6 +272,7 @@ Tell the LLM:
 
 - Build a MasterApp-compatible package, not just an app.
 - Put `app.manifest.json` at the ZIP root.
+- Put `masterapp.ai.json` at the ZIP root with concise navigation hints for brokered agents.
 - Use only relative paths in the manifest.
 - If the app is HTML-only, package it as `static` with a `wwwroot` folder.
 - If the app is C#-based, package it as `portable` or `source` and make sure it binds to `MASTERAPP_PORT`.

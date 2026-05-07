@@ -29,6 +29,7 @@ public sealed partial class CodexCliService
 
     private CodexOperationRecord? _activeOperation;
     private CodexCliProbeState _probeState = new();
+    private string? _resolvedExecutablePath;
 
     public CodexCliService(BootstrapContext context, MasterAppRuntime runtime)
     {
@@ -56,6 +57,7 @@ public sealed partial class CodexCliService
         return new
         {
             codexCommand = _context.Settings.CodexCommand,
+            resolvedExecutablePath = _resolvedExecutablePath ?? CodexExecutableResolver.Resolve(_context.Settings.CodexCommand).ResolvedExecutablePath,
             configuredWorkspaces = GetWorkspaceChoices(),
             preferredBuildCommand = _context.Settings.PreferredBuildCommand,
             preferredRestartCommand = _context.Settings.PreferredRestartCommand,
@@ -275,8 +277,9 @@ public sealed partial class CodexCliService
 
         try
         {
+            var executablePath = ResolveCodexExecutablePath();
             var exitCode = await RunProcessAsync(
-                _context.Settings.CodexCommand,
+                executablePath,
                 mode.GetArguments("Reply with READY only. Do not run tools. Do not read or edit files."),
                 workspacePath,
                 line =>
@@ -290,7 +293,8 @@ public sealed partial class CodexCliService
                     return Task.CompletedTask;
                 },
                 cancellationToken,
-                45_000);
+                45_000,
+                Encoding.UTF8);
 
             var output = stdout.ToString() + Environment.NewLine + stderr;
             if (exitCode == 0 && output.Contains("READY", StringComparison.OrdinalIgnoreCase))
@@ -313,8 +317,10 @@ public sealed partial class CodexCliService
 
     private async Task<int> RunCodexAsync(CodexOperationRecord operation, CodexCliModeDefinition mode, string prompt, CancellationToken cancellationToken)
     {
+        var executablePath = ResolveCodexExecutablePath();
+        AppendLog(operation, "system", $"Using Codex CLI: {executablePath}");
         return await RunProcessAsync(
-            _context.Settings.CodexCommand,
+            executablePath,
             mode.GetArguments(prompt),
             operation.WorkspacePath,
             line =>
@@ -328,7 +334,24 @@ public sealed partial class CodexCliService
                 return Task.CompletedTask;
             },
             cancellationToken,
-            30 * 60 * 1000);
+            30 * 60 * 1000,
+            Encoding.UTF8);
+    }
+
+    private string ResolveCodexExecutablePath()
+    {
+        var resolution = CodexExecutableResolver.Resolve(_context.Settings.CodexCommand);
+        lock (_gate)
+        {
+            _resolvedExecutablePath = resolution.ResolvedExecutablePath;
+        }
+
+        if (!resolution.IsReady || string.IsNullOrWhiteSpace(resolution.ResolvedExecutablePath))
+        {
+            throw new InvalidOperationException(resolution.LastError ?? "Codex executable was not found.");
+        }
+
+        return resolution.ResolvedExecutablePath;
     }
 
     private void HandleProcessLine(CodexOperationRecord operation, string stream, string line, bool structuredOutput)
@@ -917,7 +940,8 @@ public sealed partial class CodexCliService
         Func<string, Task> onStdoutLine,
         Func<string, Task> onStderrLine,
         CancellationToken cancellationToken,
-        int timeoutMilliseconds)
+        int timeoutMilliseconds,
+        Encoding? outputEncoding = null)
     {
         using var process = new Process
         {
@@ -928,7 +952,9 @@ public sealed partial class CodexCliService
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
                 UseShellExecute = false,
-                CreateNoWindow = true
+                CreateNoWindow = true,
+                StandardOutputEncoding = outputEncoding,
+                StandardErrorEncoding = outputEncoding
             },
             EnableRaisingEvents = true
         };

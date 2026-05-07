@@ -10,18 +10,18 @@ public sealed partial class CodexBrokerService
 {
     private IReadOnlyList<CodexRecentChat> GetRecentChats(int maxItems)
     {
+        List<CodexRecentChat> localChats;
         lock (_gate)
         {
-            return _runtimeState.Sessions
+            localChats = _runtimeState.Sessions
                 .Where(session => session.Messages.Count > 0 && IsRecentTimestampPlausible(session.UpdatedAtUtc))
-                .OrderByDescending(session => session.UpdatedAtUtc)
-                .Take(Math.Max(1, maxItems))
                 .Select(session => new CodexRecentChat
                 {
                     Id = session.Id,
                     Title = string.IsNullOrWhiteSpace(session.Title) ? "Untitled chat" : session.Title,
                     UpdatedAtUtc = session.UpdatedAtUtc,
                     Cwd = session.WorkspacePath,
+                    Source = "MasterApp",
                     Preview = session.Messages.LastOrDefault(message => string.Equals(message.Role, "assistant", StringComparison.OrdinalIgnoreCase))?.Text
                         ?? session.Messages.LastOrDefault()?.Text
                         ?? string.Empty,
@@ -39,8 +39,17 @@ public sealed partial class CodexBrokerService
                         })
                         .ToList()
                 })
-                .ToArray();
+                .ToList();
         }
+
+        return localChats
+            .Concat(ReadCodexRecentChats(Math.Max(1, maxItems * 3)))
+            .GroupBy(chat => chat.Id, StringComparer.OrdinalIgnoreCase)
+            .Select(group => group.OrderByDescending(chat => chat.UpdatedAtUtc).First())
+            .Where(IsUsefulRecentChat)
+            .OrderByDescending(chat => chat.UpdatedAtUtc)
+            .Take(Math.Max(1, maxItems))
+            .ToArray();
     }
 
     private void AppendUserMessageToCurrentSession(CodexChatRun run)
@@ -189,7 +198,7 @@ public sealed partial class CodexBrokerService
         {
             session = new CodexChatSession
             {
-                Id = Guid.NewGuid().ToString("N"),
+                Id = !string.IsNullOrWhiteSpace(run.SharedSessionId) ? run.SharedSessionId : Guid.NewGuid().ToString("N"),
                 Title = BuildSessionTitle(run.Prompt),
                 WorkspacePath = run.WorkspacePath,
                 Provider = run.Provider,
@@ -222,6 +231,11 @@ public sealed partial class CodexBrokerService
 
     private void TouchSession_NoLock(CodexChatSession session, CodexChatRun run)
     {
+        if (!string.IsNullOrWhiteSpace(run.SharedSessionId))
+        {
+            session.Id = run.SharedSessionId;
+        }
+
         session.Title = string.IsNullOrWhiteSpace(session.Title)
             ? BuildSessionTitle(run.Prompt)
             : session.Title;
@@ -237,6 +251,30 @@ public sealed partial class CodexBrokerService
             .OrderByDescending(item => item.UpdatedAtUtc)
             .ToList();
         _runtimeState.CurrentSessionId = session.Id;
+    }
+
+    private void AdoptSharedSessionId(CodexChatRun run)
+    {
+        if (string.IsNullOrWhiteSpace(run.SharedSessionId))
+        {
+            return;
+        }
+
+        lock (_gate)
+        {
+            var session = _runtimeState.Sessions.FirstOrDefault(item =>
+                string.Equals(item.Id, _runtimeState.CurrentSessionId, StringComparison.OrdinalIgnoreCase) ||
+                item.Messages.Any(message => string.Equals(message.RunId, run.Id, StringComparison.OrdinalIgnoreCase)));
+            if (session is null)
+            {
+                return;
+            }
+
+            session.Id = run.SharedSessionId;
+            _runtimeState.CurrentSessionId = run.SharedSessionId;
+            TouchSession_NoLock(session, run);
+            PersistRuntimeState_NoLock();
+        }
     }
 
     private void TrimSessions_NoLock()
@@ -264,94 +302,52 @@ public sealed partial class CodexBrokerService
     private CodexRecentChat? ReadRecentChat(SessionIndexEntry entry)
     {
         var sessionPath = FindSessionFile(entry.Id);
-        var recent = new CodexRecentChat
-        {
-            Id = entry.Id,
-            Title = string.IsNullOrWhiteSpace(entry.ThreadName) ? "Untitled chat" : entry.ThreadName!,
-            UpdatedAtUtc = entry.UpdatedAt,
-            SessionPath = sessionPath
-        };
+        return CodexSessionLogReader.ReadRecentChat(
+            sessionPath,
+            entry.Id,
+            string.IsNullOrWhiteSpace(entry.ThreadName) ? "Untitled chat" : entry.ThreadName!,
+            entry.UpdatedAt);
+    }
 
-        if (string.IsNullOrWhiteSpace(sessionPath) || !File.Exists(sessionPath))
+    private IReadOnlyList<CodexRecentChat> ReadCodexRecentChats(int maxItems)
+    {
+        if (!File.Exists(_codexSessionIndexFile))
         {
-            recent.Preview = recent.Title;
-            return recent;
+            return Array.Empty<CodexRecentChat>();
         }
 
         try
         {
-            if (new FileInfo(sessionPath).Length == 0)
-            {
-                recent.Preview = recent.Title;
-                return recent;
-            }
-
-            string? firstUser = null;
-            string? lastAssistant = null;
-
-            foreach (var line in File.ReadLines(sessionPath))
-            {
-                if (string.IsNullOrWhiteSpace(line))
-                {
-                    continue;
-                }
-
-                try
-                {
-                    using var document = JsonDocument.Parse(line);
-                    var root = document.RootElement;
-                    var type = root.TryGetProperty("type", out var typeProp) ? typeProp.GetString() : null;
-
-                    if (string.Equals(type, "session_meta", StringComparison.OrdinalIgnoreCase) &&
-                        root.TryGetProperty("payload", out var metaPayload) &&
-                        metaPayload.TryGetProperty("cwd", out var cwdProp))
-                    {
-                        recent.Cwd = cwdProp.GetString() ?? string.Empty;
-                        continue;
-                    }
-
-                    if (!string.Equals(type, "response_item", StringComparison.OrdinalIgnoreCase) ||
-                        !root.TryGetProperty("payload", out var payload) ||
-                        !string.Equals(payload.TryGetProperty("type", out var itemType) ? itemType.GetString() : null, "message", StringComparison.OrdinalIgnoreCase))
-                    {
-                        continue;
-                    }
-
-                    var role = payload.TryGetProperty("role", out var roleProp) ? roleProp.GetString() : null;
-                    var phase = payload.TryGetProperty("phase", out var phaseProp) ? phaseProp.GetString() : null;
-                    var text = ExtractMessageText(payload);
-                    if (string.IsNullOrWhiteSpace(text))
-                    {
-                        continue;
-                    }
-
-                    if (string.Equals(role, "user", StringComparison.OrdinalIgnoreCase) && !LooksLikeMetaMessage(text))
-                    {
-                        firstUser ??= TrimForLog(text, 220);
-                    }
-                    else if (string.Equals(role, "assistant", StringComparison.OrdinalIgnoreCase) &&
-                             !string.Equals(phase, "commentary", StringComparison.OrdinalIgnoreCase))
-                    {
-                        lastAssistant = TrimForLog(text, 320);
-                    }
-                }
-                catch
-                {
-                    // ignore malformed session lines
-                }
-            }
-
-            recent.UserPreview = firstUser ?? string.Empty;
-            recent.AssistantPreview = lastAssistant ?? string.Empty;
-            recent.Preview = !string.IsNullOrWhiteSpace(lastAssistant)
-                ? lastAssistant
-                : (!string.IsNullOrWhiteSpace(firstUser) ? firstUser : recent.Title);
-            return IsUsefulRecentChat(recent) ? recent : null;
+            return File.ReadLines(_codexSessionIndexFile)
+                .Reverse()
+                .Select(TryReadSessionIndexEntry)
+                .Where(entry => entry is not null && IsRecentTimestampPlausible(entry.UpdatedAt))
+                .Take(Math.Max(1, maxItems))
+                .Select(entry => ReadRecentChat(entry!))
+                .Where(chat => chat is not null)
+                .Select(chat => chat!)
+                .ToArray();
         }
         catch
         {
-            recent.Preview = recent.Title;
-            return IsUsefulRecentChat(recent) ? recent : null;
+            return Array.Empty<CodexRecentChat>();
+        }
+    }
+
+    private static SessionIndexEntry? TryReadSessionIndexEntry(string line)
+    {
+        if (string.IsNullOrWhiteSpace(line))
+        {
+            return null;
+        }
+
+        try
+        {
+            return JsonSerializer.Deserialize<SessionIndexEntry>(line, JsonOptions.Default);
+        }
+        catch
+        {
+            return null;
         }
     }
 

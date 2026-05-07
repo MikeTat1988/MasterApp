@@ -3,6 +3,7 @@ using MasterApp.Models;
 using MasterApp.Storage;
 using System.Collections.Concurrent;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using System.Threading.Channels;
 
 namespace MasterApp.Hosting;
@@ -78,10 +79,7 @@ public sealed partial class CodexBrokerService
         else
         {
             EnsureCliReadyForExecution();
-            if (string.IsNullOrWhiteSpace(model))
-            {
-                model = TryReadCurrentCodexModel() ?? string.Empty;
-            }
+            model = ResolveSupportedCodexModel(string.IsNullOrWhiteSpace(model) ? TryReadCurrentCodexModel() : model);
         }
 
         CodexChatRun run;
@@ -100,6 +98,7 @@ public sealed partial class CodexBrokerService
             run = new CodexChatRun
             {
                 Id = Guid.NewGuid().ToString("N"),
+                SharedSessionId = request.SessionId?.Trim() ?? string.Empty,
                 Status = "queued",
                 Provider = provider,
                 RequestedMode = requestedMode,
@@ -232,6 +231,12 @@ public sealed partial class CodexBrokerService
             throw new InvalidOperationException("Model is required.");
         }
 
+        if (!IsOllamaProvider(provider))
+        {
+            EnsureCliReadyForExecution();
+            model = ResolveSupportedCodexModel(model);
+        }
+
         lock (_gate)
         {
             _runtimeState.CurrentProvider = provider;
@@ -247,9 +252,9 @@ public sealed partial class CodexBrokerService
     {
         cancellationToken.ThrowIfCancellationRequested();
         var decision = request.Decision?.Trim().ToLowerInvariant();
-        if (decision is not "approve" and not "reject")
+        if (decision is not "approve" and not "approve-once" and not "trust" and not "reject")
         {
-            throw new InvalidOperationException("Decision must be 'approve' or 'reject'.");
+            throw new InvalidOperationException("Decision must be 'approve', 'approve-once', 'trust', or 'reject'.");
         }
 
         PendingApprovalContext? pendingContext;
@@ -273,14 +278,24 @@ public sealed partial class CodexBrokerService
                 throw new InvalidOperationException("Approval request has already been resolved.");
             }
 
+            if (decision == "trust" && !_runtimeState.PendingApproval.CanTrustWorkspace)
+            {
+                throw new InvalidOperationException("This approval cannot trust a workspace.");
+            }
+
+            if (decision == "trust")
+            {
+                TrustWorkspace_NoLock(_runtimeState.PendingApproval.TrustWorkspacePath);
+            }
+
             activeRun = _runtimeState.ActiveRun is null ? null : Clone(_runtimeState.ActiveRun);
-            _runtimeState.PendingApproval.Status = decision == "approve" ? "approved" : "rejected";
+            _runtimeState.PendingApproval.Status = decision is "approve" or "approve-once" or "trust" ? "approved" : "rejected";
             _runtimeState.PendingApproval.ResolvedAtUtc = DateTimeOffset.UtcNow;
             _runtimeState.PendingApproval = null;
 
             if (_runtimeState.ActiveRun is not null)
             {
-                _runtimeState.ActiveRun.Status = decision == "approve" ? "running-command" : "processing";
+                _runtimeState.ActiveRun.Status = decision is "approve" or "approve-once" or "trust" ? "running-command" : "processing";
                 _runtimeState.ActiveRun.UpdatedAtUtc = DateTimeOffset.UtcNow;
             }
 
@@ -296,6 +311,24 @@ public sealed partial class CodexBrokerService
 
         PublishSnapshot();
         return Task.FromResult(activeRun ?? new CodexChatRun());
+    }
+
+    private void TrustWorkspace_NoLock(string workspacePath)
+    {
+        if (string.IsNullOrWhiteSpace(workspacePath))
+        {
+            throw new InvalidOperationException("Workspace path is required.");
+        }
+
+        var fullPath = Path.GetFullPath(workspacePath);
+        if (!_context.Settings.WorkspacePaths.Contains(fullPath, StringComparer.OrdinalIgnoreCase))
+        {
+            _context.Settings.WorkspacePaths.Add(fullPath);
+            File.WriteAllText(
+                _context.Paths.SettingsFile,
+                JsonSerializer.Serialize(_context.Settings, JsonOptions.DefaultIndented));
+            _context.Log.Codex("CodexBrokerService", $"Trusted Codex workspace: {fullPath}");
+        }
     }
 
     private async Task ExecuteRunAsync(CodexChatRun run, CancellationToken cancellationToken)
@@ -314,103 +347,31 @@ public sealed partial class CodexBrokerService
 
         try
         {
-            UpdateRun(run, "processing", "Preparing Codex request.");
+            UpdateRun(run, "processing", string.IsNullOrWhiteSpace(run.SharedSessionId)
+                ? "Starting shared Codex session."
+                : "Resuming shared Codex session.");
 
-            if (IsOllamaProvider(run.Provider))
+            await RunSharedCodexTurnAsync(run, cancellationToken);
+            try
             {
-                UpdateRun(run, "processing", "Sending request to local Ollama.");
-                run.ResponseText = await RequestOllamaResponseAsync(
-                    run.Model,
-                    run.Prompt,
-                    GetConversationMessages(run, 12),
-                    cancellationToken);
-                run.Summary = TrimForLog(string.IsNullOrWhiteSpace(run.ResponseText) ? "Completed." : run.ResponseText, 240);
-                run.Status = "completed";
-                return;
+                run.ChangedFiles = GetChangedFiles(baselineSnapshot, CaptureWorkspaceSnapshot(run.WorkspacePath));
+            }
+            catch (Exception ex)
+            {
+                AppendLog(run, "system", $"Changed file scan warning: {ex.Message}");
             }
 
-            for (var step = 0; step < MaxDecisionSteps; step++)
+            if (string.Equals(run.Status, "completed", StringComparison.OrdinalIgnoreCase) &&
+                ShouldScheduleHostRestartAfterSharedTurn(run))
             {
-                cancellationToken.ThrowIfCancellationRequested();
-
-                var decision = await AskCodexForDecisionAsync(run, cancellationToken);
-                if (string.Equals(decision.Kind, "final", StringComparison.OrdinalIgnoreCase))
-                {
-                    run.ResponseText = (decision.Response ?? string.Empty).Trim();
-                    run.Summary = TrimForLog(string.IsNullOrWhiteSpace(run.ResponseText) ? "Completed." : run.ResponseText, 240);
-                    run.Status = "completed";
-                    break;
-                }
-
-                var approval = CreateApprovalRequest(run, decision);
-                if (ShouldAutoApproveReadOnlyCommand(approval))
-                {
-                    AppendLog(run, "approval", $"Auto-approved read-only command: {approval.Summary}");
-                    var autoRecord = await ExecuteApprovedActionAsync(run, decision, approval, cancellationToken);
-                    autoRecord.Decision = "auto-approved";
-                    run.ApprovalHistory.Add(autoRecord);
-
-                    try
-                    {
-                        run.ChangedFiles = GetChangedFiles(baselineSnapshot, CaptureWorkspaceSnapshot(run.WorkspacePath));
-                    }
-                    catch (Exception ex)
-                    {
-                        AppendLog(run, "system", $"Changed file scan warning: {ex.Message}");
-                    }
-
-                    run.Status = "processing";
-                    run.UpdatedAtUtc = DateTimeOffset.UtcNow;
-                    PublishRun(run);
-                    continue;
-                }
-
-                var resolution = await WaitForApprovalAsync(run, approval, cancellationToken);
-                if (string.Equals(resolution.Decision, "reject", StringComparison.OrdinalIgnoreCase))
-                {
-                    run.ApprovalHistory.Add(new CodexApprovalRecord
-                    {
-                        Id = approval.Id,
-                        Kind = approval.Kind,
-                        Summary = approval.Summary,
-                        Command = approval.Command,
-                        WorkingDirectory = approval.WorkingDirectory,
-                        Decision = "reject",
-                        OutputSummary = "User rejected the requested action.",
-                        RequestedAtUtc = approval.RequestedAtUtc,
-                        ResolvedAtUtc = DateTimeOffset.UtcNow
-                    });
-                    AppendLog(run, "approval", $"{approval.Kind} rejected: {approval.Summary}");
-                    PublishRun(run);
-                    continue;
-                }
-
-                var record = await ExecuteApprovedActionAsync(run, decision, approval, cancellationToken);
-                run.ApprovalHistory.Add(record);
-
-                try
-                {
-                    run.ChangedFiles = GetChangedFiles(baselineSnapshot, CaptureWorkspaceSnapshot(run.WorkspacePath));
-                }
-                catch (Exception ex)
-                {
-                    AppendLog(run, "system", $"Changed file scan warning: {ex.Message}");
-                }
-
-                if (string.Equals(approval.Kind, "restart", StringComparison.OrdinalIgnoreCase))
-                {
-                    break;
-                }
-
-                run.Status = "processing";
-                run.UpdatedAtUtc = DateTimeOffset.UtcNow;
-                PublishRun(run);
-            }
-
-            if (!IsTerminal(run.Status))
-            {
-                run.Status = "failed";
-                run.FailureMessage = "Codex reached the step limit before finishing.";
+                var relaunch = await _runtime.ScheduleSelfRelaunchAsync(
+                    run.Id,
+                    run.WorkspacePath,
+                    "Codex completed a run that requested a MasterApp restart.");
+                run.RestartStatus = relaunch;
+                run.Status = relaunch.Status is "scheduled" or "launched" ? "restart-scheduled" : "failed";
+                run.FailureMessage = run.Status == "failed" ? relaunch.Message : null;
+                AppendLog(run, "restart", relaunch.Message);
             }
         }
         catch (OperationCanceledException)
@@ -459,6 +420,84 @@ public sealed partial class CodexBrokerService
 
             PublishSnapshot();
         }
+    }
+
+    private bool TrySkipRepeatedCommand(CodexChatRun run, CodexApprovalRequest approval, out string? repeatedLoopMessage)
+    {
+        repeatedLoopMessage = null;
+        if (!string.Equals(approval.Kind, "command", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var normalized = NormalizeLoopCommand(approval.Command);
+        if (string.IsNullOrWhiteSpace(normalized))
+        {
+            return false;
+        }
+
+        var matches = run.ApprovalHistory
+            .Where(item => string.Equals(item.Kind, "command", StringComparison.OrdinalIgnoreCase))
+            .Where(item => string.Equals(NormalizeLoopCommand(item.Command), normalized, StringComparison.OrdinalIgnoreCase))
+            .ToList();
+
+        if (matches.Count == 0)
+        {
+            return false;
+        }
+
+        const string summary = "Skipped a repeated command so Codex can pivot instead of burning orchestration steps.";
+        AppendLog(run, "system", $"{summary} Command: {approval.Command}");
+        run.ApprovalHistory.Add(new CodexApprovalRecord
+        {
+            Id = approval.Id,
+            Kind = approval.Kind,
+            Summary = approval.Summary,
+            Command = approval.Command,
+            WorkingDirectory = approval.WorkingDirectory,
+            Decision = "skipped",
+            OutputSummary = summary,
+            RequestedAtUtc = approval.RequestedAtUtc,
+            ResolvedAtUtc = DateTimeOffset.UtcNow
+        });
+
+        if (matches.Count >= 2)
+        {
+            repeatedLoopMessage = "Codex entered a repeated-command loop and was stopped before wasting more orchestration steps. The broker now requires it to pivot after duplicate inspections.";
+        }
+
+        return true;
+    }
+
+    private static string NormalizeLoopCommand(string? command)
+    {
+        if (string.IsNullOrWhiteSpace(command))
+        {
+            return string.Empty;
+        }
+
+        return Regex.Replace(command.Trim(), "\\s+", " ");
+    }
+
+    private static bool ShouldScheduleHostRestartAfterSharedTurn(CodexChatRun run)
+    {
+        var prompt = run.Prompt ?? string.Empty;
+        if (string.IsNullOrWhiteSpace(prompt))
+        {
+            return false;
+        }
+
+        var text = prompt.ToLowerInvariant();
+        if (!text.Contains("restart", StringComparison.Ordinal) &&
+            !text.Contains("relaunch", StringComparison.Ordinal) &&
+            !text.Contains("перезап", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        return run.ChangedFiles.Count > 0 ||
+               text.Contains("after the change", StringComparison.Ordinal) ||
+               text.Contains("после", StringComparison.Ordinal);
     }
 
     private Task<CodexApprovalDecisionRequest> WaitForApprovalAsync(
@@ -513,11 +552,12 @@ public sealed partial class CodexBrokerService
             availableModels = GetAvailableModels(),
             configuredWorkspaces = GetWorkspaceChoices(),
             currentSessionId = GetCurrentSessionId(),
-            recentChats = GetRecentChats(5),
+            recentChats = GetRecentChats(4),
             activeRun = runtime.ActiveRun,
             pendingApproval = runtime.PendingApproval,
             autoApproveReadOnlyCommands = true,
             ollama,
+            usage = BuildUsageSummary(runtime, currentProvider, currentModel),
             logsPath = _context.Log.GetPath(Diagnostics.LogKind.Codex),
             preferredBuildCommand = _context.Settings.PreferredBuildCommand,
             preferredRestartCommand = _context.Settings.PreferredRestartCommand,

@@ -19,7 +19,7 @@ public sealed class MasterAppApplicationContext : ApplicationContext
         _log = log;
 
         var menu = new ContextMenuStrip();
-        menu.Items.Add("Open Dashboard", null, (_, _) => SafeRun("Open Dashboard", _runtime.OpenDashboard));
+        menu.Items.Add("Open Store", null, (_, _) => SafeRun("Open Store", _runtime.OpenDashboard));
         menu.Items.Add("Open Public", null, (_, _) => SafeRun("Open Public", _runtime.OpenPublic));
         menu.Items.Add("Open Phone QR", null, (_, _) => SafeRun("Open Phone QR", _runtime.OpenPhoneQr));
         menu.Items.Add("Open Logs Folder", null, (_, _) => SafeRun("Open Logs Folder", _runtime.OpenLogsFolder));
@@ -37,7 +37,7 @@ public sealed class MasterAppApplicationContext : ApplicationContext
             Visible = true
         };
 
-        _notifyIcon.DoubleClick += (_, _) => SafeRun("Open Dashboard", _runtime.OpenDashboard);
+        _notifyIcon.DoubleClick += (_, _) => SafeRun("Open Store", _runtime.OpenDashboard);
 
         _log.Info("Tray", "Tray icon initialized.");
     }
@@ -70,6 +70,7 @@ public sealed class MasterAppApplicationContext : ApplicationContext
         try
         {
             _log.Info("Tray", "Quit clicked.");
+            _runtime.MarkExplicitQuit();
             _notifyIcon.Visible = false;
             _runtime.Dispose();
         }

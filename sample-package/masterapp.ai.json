@@ -1,0 +1,18 @@
+{
+  "summary": "This sample package is a static MasterApp app. The user-facing UI is under wwwroot and the entry page is index.html.",
+  "preferredEntryPoints": [
+    "app.manifest.json",
+    "wwwroot/index.html"
+  ],
+  "hotspotFiles": [
+    "app.manifest.json",
+    "wwwroot/index.html"
+  ],
+  "investigationHints": [
+    "Read app.manifest.json first to confirm package type and entry file.",
+    "For UI issues, inspect files under wwwroot before searching elsewhere."
+  ],
+  "avoidPatterns": [
+    "Do not assume there is a native executable for this package."
+  ]
+}

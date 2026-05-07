@@ -7,8 +7,42 @@ MasterApp now supports three package types:
 
 ## Required files
 - `app.manifest.json` at package root.
+- `masterapp.ai.json` at package root is strongly recommended for any package that may be inspected or fixed through the MasterApp Codex/Ollama broker.
 - For `static` apps: a `wwwroot` folder and an `entry` file inside it.
 - For `portable` and `source` apps: a runnable `launch.executablePath`.
+
+## Optional AI hints file
+
+`masterapp.ai.json` is a lightweight root-level hints file for brokered agents. It helps MasterApp switch context into an installed app without spending most of the step budget just discovering the project layout.
+
+Recommended shape:
+
+```json
+{
+  "summary": "One short paragraph about the app.",
+  "preferredEntryPoints": [
+    "app.manifest.json",
+    "wwwroot/index.html"
+  ],
+  "hotspotFiles": [
+    "wwwroot/index.html",
+    "wwwroot/app.js"
+  ],
+  "investigationHints": [
+    "For UI issues start in wwwroot.",
+    "Read app.manifest.json before changing launch behavior."
+  ],
+  "avoidPatterns": [
+    "Do not search outside the package root."
+  ]
+}
+```
+
+Recommendations:
+- keep entries relative to the package root
+- list only the highest-signal files
+- use short, concrete hints rather than long prose
+- update the file when major app structure changes
 
 ## Install layout
 Installed apps are stored under:
@@ -27,7 +61,7 @@ Minimal shape:
   "version": "1.0.0",
   "appType": "static|portable|source",
   "entry": "index.html",
-  "icon": "optional/relative/path.png",
+  "icon": "assets/app-icon.png",
   "launch": {
     "kind": "static|webApp",
     "executablePath": "relative/path/to/app.exe",
@@ -80,7 +114,9 @@ Minimal shape:
 - Publish is enabled only when the manifest has a `publish` block with both `command` and `outputPath`.
 - Published artifacts are copied to the configured `Published` folder under:
   - `Published\<appId>\<version>\`
-- If `createZip` is true, MasterApp also creates a zip beside the published output for easy sharing.
+- If `createZip` is true, MasterApp also creates an installable zip beside the published output.
+- The publish zip must include `app.manifest.json` at the zip root.
+- When publishing a `source` app, MasterApp packages the publish output as a `portable` install artifact so the resulting zip can be dropped straight into `Incoming`.
 
 ## Phone and Store mode
 - Apps open from MasterApp at `/apps/<appId>/`.
@@ -89,12 +125,21 @@ Minimal shape:
 - iPhone home-screen support is web-based: open the app through the HTTPS tunnel in Safari and use Add to Home Screen.
 - MasterApp does not create native iOS app packages.
 
+## App icons
+- Store apps should include a real raster app icon, not only a symbolic SVG glyph.
+- Recommended runtime icon: `assets/app-icon.png`, `512x512` PNG, square, no transparency, no text, no watermark.
+- Minimum acceptable icon size: `180x180` PNG, so it stays crisp on iPhone-style Store cards and home-screen previews.
+- Optional source icon: keep a separate `assets/app-icon-source.png` at `1024x1024` only if the app needs editable/master artwork. Do not point the manifest at the oversized source image.
+- Set the manifest field to the relative path, for example `"icon": "assets/app-icon.png"`.
+- Reuse the existing icon when updating an app unless the visual identity is intentionally changing; do not generate a new icon every time because that creates duplicate assets and needless rewrites.
+
 ## Recommendations for app authors and LLMs
 - Make runnable apps bind to `MASTERAPP_PORT` or `ASPNETCORE_URLS` instead of hard-coding their own ports.
 - Treat `launch.port` as an optional preferred port only. MasterApp may assign a different free port at runtime.
 - Keep all manifest paths relative.
 - Do not rely on guessing build commands; declare them in the manifest.
-- Add an icon for any app intended for Store mode.
+- Add `masterapp.ai.json` so brokered agents can navigate the app with fewer steps.
+- Add an actual app icon image for any app intended for Store mode, preferably `assets/app-icon.png` at `512x512`.
 - Add a `publish` block for apps that should produce a shareable self-contained `.exe` or portable folder.
 - Keep user data in declared `dataDirectories` so upgrades do not wipe it.
 

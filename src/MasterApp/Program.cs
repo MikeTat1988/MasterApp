@@ -1,7 +1,9 @@
 using MasterApp.Bootstrap;
 using MasterApp.Diagnostics;
 using MasterApp.Hosting;
+using MasterApp.Storage;
 using MasterApp.Tray;
+using MasterApp.Utilities;
 using System.Windows.Forms;
 
 namespace MasterApp;
@@ -13,11 +15,24 @@ internal static class Program
     {
         BootstrapContext? bootstrap = null;
         MasterAppRuntime? runtime = null;
+        SingleInstanceLease? instanceLease = null;
 
         try
         {
+            instanceLease = SingleInstanceGate.TryAcquire(@"Local\MasterApp.SingleInstance");
+            if (!instanceLease.IsAcquired)
+            {
+                MessageBox.Show(
+                    "MasterApp is already running.",
+                    "MasterApp",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Information);
+                return;
+            }
+
             bootstrap = Bootstrapper.Initialize();
             bootstrap.Log.Info("Program", "Bootstrap complete.");
+            new WatchdogStateStore(bootstrap.Paths, bootstrap.Log).ClearShutdownIntent();
 
             runtime = new MasterAppRuntime(bootstrap);
             runtime.Start();
@@ -54,6 +69,7 @@ internal static class Program
                 bootstrap?.Log.Error("Program", "Error during final disposal.", ex);
             }
 
+            instanceLease?.Dispose();
             bootstrap?.Log.Info("Program", "Process exit.");
         }
     }

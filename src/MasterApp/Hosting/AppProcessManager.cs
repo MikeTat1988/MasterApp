@@ -38,6 +38,19 @@ public sealed class AppProcessManager : IDisposable
             return BuildRunState(installed, managed.Process, "running", "App is running.");
         }
 
+        if (installed.RunState.IsRunning && string.Equals(installed.RunState.Status, "running", StringComparison.OrdinalIgnoreCase))
+        {
+            return IsStoredRunStateAlive(installed)
+                ? installed.RunState
+                : new AppRunState
+                {
+                    Status = "stopped",
+                    IsRunning = false,
+                    Message = "App is not running.",
+                    StoppedAtUtc = DateTimeOffset.UtcNow
+                };
+        }
+
         return installed.RunState;
     }
 
@@ -61,9 +74,23 @@ public sealed class AppProcessManager : IDisposable
 
         if (_processes.TryGetValue(appId, out var existing) && existing.Process is { HasExited: false })
         {
+            if (ShouldRestartForInstalledUpdate(installed, existing.Process))
+            {
+                _context.Log.Info("AppProcessManager", $"Restarting app '{appId}' to pick up installed version {installed.ActiveVersion}.");
+                var stopResult = Stop(appId);
+                if (!stopResult.Ok)
+                {
+                    throw new InvalidOperationException(stopResult.Message);
+                }
+
+                installed = _context.RuntimeStateStore.GetApp(appId) ?? installed;
+            }
+            else
+            {
             var existingState = BuildRunState(installed, existing.Process, "running", "App is already running.");
             _context.RuntimeStateStore.UpdateRunState(appId, existingState);
             return existingState;
+            }
         }
 
         installed = await EnsureAssignedPortAsync(installed, cancellationToken);
@@ -173,7 +200,6 @@ public sealed class AppProcessManager : IDisposable
             throw new InvalidOperationException($"APP_START_FAILED: {installed.Id}");
         }
 
-        AttachProcessLogging(installed.Id, process);
         return process;
     }
 
@@ -215,8 +241,6 @@ public sealed class AppProcessManager : IDisposable
         startInfo.UseShellExecute = false;
         startInfo.CreateNoWindow = true;
         startInfo.WindowStyle = ProcessWindowStyle.Hidden;
-        startInfo.RedirectStandardOutput = true;
-        startInfo.RedirectStandardError = true;
 
         foreach (var pair in manifest.Launch.EnvironmentVariables)
         {
@@ -310,32 +334,17 @@ public sealed class AppProcessManager : IDisposable
         }
     }
 
-    private void AttachProcessLogging(string appId, Process process)
+    private bool IsStoredRunStateAlive(InstalledAppState installed)
     {
-        process.OutputDataReceived += (_, args) =>
-        {
-            if (!string.IsNullOrWhiteSpace(args.Data))
-            {
-                _context.Log.Info($"HostedApp:{appId}", args.Data);
-            }
-        };
-
-        process.ErrorDataReceived += (_, args) =>
-        {
-            if (!string.IsNullOrWhiteSpace(args.Data))
-            {
-                _context.Log.Warn($"HostedApp:{appId}", args.Data);
-            }
-        };
-
         try
         {
-            process.BeginOutputReadLine();
-            process.BeginErrorReadLine();
+            var healthUrl = new Uri(new Uri(GetTargetBaseUrl(installed)), installed.Manifest.Launch.HealthPath ?? "/");
+            using var response = _httpClient.GetAsync(healthUrl).GetAwaiter().GetResult();
+            return (int)response.StatusCode < 500;
         }
-        catch (InvalidOperationException)
+        catch
         {
-            // Ignore logging hookup failures if the child process exits immediately.
+            return false;
         }
     }
 
@@ -400,6 +409,24 @@ public sealed class AppProcessManager : IDisposable
             Message = message,
             StartedAtUtc = startedAtUtc
         };
+    }
+
+    private static bool ShouldRestartForInstalledUpdate(InstalledAppState installed, Process process)
+    {
+        if (installed.InstalledAtUtc == default)
+        {
+            return false;
+        }
+
+        try
+        {
+            var processStartedUtc = new DateTimeOffset(process.StartTime.ToUniversalTime(), TimeSpan.Zero);
+            return processStartedUtc < installed.InstalledAtUtc;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     private void SyncPersistentData(InstalledAppState installed, string installRoot)

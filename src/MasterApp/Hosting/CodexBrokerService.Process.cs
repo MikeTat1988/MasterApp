@@ -1,6 +1,7 @@
 using MasterApp.Models;
 using MasterApp.Storage;
 using System.Diagnostics;
+using System.Text;
 using System.Text.Json;
 using System.Threading.Channels;
 
@@ -129,7 +130,8 @@ public sealed partial class CodexBrokerService
         string fileName,
         IReadOnlyList<string> arguments,
         string workingDirectory,
-        int timeoutMilliseconds)
+        int timeoutMilliseconds,
+        Encoding? outputEncoding = null)
     {
         using var process = new Process
         {
@@ -140,7 +142,9 @@ public sealed partial class CodexBrokerService
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
                 UseShellExecute = false,
-                CreateNoWindow = true
+                CreateNoWindow = true,
+                StandardOutputEncoding = outputEncoding,
+                StandardErrorEncoding = outputEncoding
             }
         };
 
@@ -200,7 +204,8 @@ public sealed partial class CodexBrokerService
         Func<string, Task> onStdoutLine,
         Func<string, Task> onStderrLine,
         CancellationToken cancellationToken,
-        int timeoutMilliseconds)
+        int timeoutMilliseconds,
+        Encoding? outputEncoding = null)
     {
         using var process = new Process
         {
@@ -211,7 +216,9 @@ public sealed partial class CodexBrokerService
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
                 UseShellExecute = false,
-                CreateNoWindow = true
+                CreateNoWindow = true,
+                StandardOutputEncoding = outputEncoding,
+                StandardErrorEncoding = outputEncoding
             },
             EnableRaisingEvents = true
         };
@@ -297,6 +304,7 @@ public sealed partial class CodexBrokerService
 public sealed class CodexChatRequest
 {
     public string Prompt { get; set; } = string.Empty;
+    public string? SessionId { get; set; }
     public string? WorkspacePath { get; set; }
     public string? Provider { get; set; }
     public string? Model { get; set; }
@@ -340,6 +348,7 @@ public sealed class CodexModelRequest
         public string Title { get; set; } = string.Empty;
         public DateTimeOffset UpdatedAtUtc { get; set; }
         public string Cwd { get; set; } = string.Empty;
+        public string Source { get; set; } = "MasterApp";
         public string Preview { get; set; } = string.Empty;
         public string UserPreview { get; set; } = string.Empty;
         public string AssistantPreview { get; set; } = string.Empty;

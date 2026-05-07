@@ -38,7 +38,9 @@ public static class Bootstrapper
             SettingsFile = Path.Combine(state, "settings.json"),
             SecretsFile = Path.Combine(state, "secrets.json"),
             RuntimeStateFile = Path.Combine(state, "runtime-state.json"),
-            RelaunchStateFile = Path.Combine(state, "relaunch-state.json")
+            RelaunchStateFile = Path.Combine(state, "relaunch-state.json"),
+            ShutdownIntentFile = Path.Combine(state, "shutdown-intent.json"),
+            WatchdogStateFile = Path.Combine(state, "watchdog-state.json")
         };
 
         var log = new FileLogManager(paths.LogsDirectory);
@@ -205,7 +207,22 @@ public static class Bootstrapper
         }
 
         settings.CodexHistoryLimit = Math.Clamp(settings.CodexHistoryLimit, 1, 25);
+        settings.CodexMaxDecisionSteps = Math.Clamp(settings.CodexMaxDecisionSteps, 4, 100);
+        settings.OllamaMaxDecisionSteps = Math.Clamp(settings.OllamaMaxDecisionSteps, settings.CodexMaxDecisionSteps, 200);
+        settings.CodexUsageRequestsPer5Hours = Math.Clamp(settings.CodexUsageRequestsPer5Hours, 1, 5000);
+        settings.CodexUsageRequestsPerWeek = Math.Clamp(settings.CodexUsageRequestsPerWeek, settings.CodexUsageRequestsPer5Hours, 50000);
         settings.ConfigBackupRetentionCount = Math.Clamp(settings.ConfigBackupRetentionCount, 1, 50);
+        settings.LifeJournal ??= new();
+        if (string.IsNullOrWhiteSpace(settings.LifeJournal.CodexExecutablePath))
+        {
+            settings.LifeJournal.CodexExecutablePath = "codex";
+        }
+
+        settings.LifeJournal.MaxImagesForAnalysis = Math.Clamp(settings.LifeJournal.MaxImagesForAnalysis, 1, 64);
+        settings.LifeJournal.AnalysisTimeoutSeconds = Math.Clamp(settings.LifeJournal.AnalysisTimeoutSeconds, 5, 3600);
+        settings.LifeJournal.AutoFinalizeHourLocal = Math.Clamp(settings.LifeJournal.AutoFinalizeHourLocal, 0, 23);
+        settings.LifeJournal.PhotoMaxWidth = Math.Clamp(settings.LifeJournal.PhotoMaxWidth, 320, 2400);
+        settings.LifeJournal.JpegQuality = Math.Clamp(settings.LifeJournal.JpegQuality, 35, 95);
     }
 
     private static string? DetectWorkspaceRoot()

@@ -1,3 +1,5 @@
+using MasterApp.LifeJournal;
+
 namespace MasterApp.Models;
 
 public sealed class AppSettings
@@ -16,7 +18,12 @@ public sealed class AppSettings
     public string PreferredRestartCommand { get; set; } = string.Empty;
     public bool PreferCodexJsonOutput { get; set; } = true;
     public int CodexHistoryLimit { get; set; } = 8;
+    public int CodexMaxDecisionSteps { get; set; } = 20;
+    public int OllamaMaxDecisionSteps { get; set; } = 36;
+    public int CodexUsageRequestsPer5Hours { get; set; } = 200;
+    public int CodexUsageRequestsPerWeek { get; set; } = 2000;
     public int ConfigBackupRetentionCount { get; set; } = 10;
+    public LifeJournalSettings LifeJournal { get; set; } = new();
 
     public static AppSettings CreateDefault() => new();
 }

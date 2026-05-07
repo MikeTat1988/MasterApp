@@ -1,5 +1,6 @@
 using MasterApp.Bootstrap;
 using MasterApp.Diagnostics;
+using MasterApp.LifeJournal;
 using MasterApp.Models;
 using MasterApp.Packages;
 using MasterApp.Tunnel;
@@ -30,7 +31,10 @@ public sealed class MasterAppRuntime : IDisposable
     private readonly PackageWatcherService _packageWatcher;
     private readonly AppProcessManager _appProcessManager;
     private readonly TunnelManager _tunnelManager;
+    private readonly WatchdogStateStore _watchdogStateStore;
     private readonly CodexBrokerService _codexService;
+    private readonly LifeJournalService _lifeJournal;
+    private readonly LifeJournalFinalizer _lifeJournalFinalizer;
     private readonly HttpClient _proxyClient;
     private readonly FileExtensionContentTypeProvider _contentTypes = new();
     private readonly object _gate = new();
@@ -44,9 +48,17 @@ public sealed class MasterAppRuntime : IDisposable
         _packageManager = new PackageManager(_context);
         _appPublisher = new AppPublisher(_context);
         _packageWatcher = new PackageWatcherService(_packageManager, _context.Log, _context.Settings.PackageScanIntervalSeconds);
+        _watchdogStateStore = new WatchdogStateStore(_context.Paths, _context.Log);
         _appProcessManager = new AppProcessManager(_context);
         _tunnelManager = new TunnelManager(_context);
         _codexService = new CodexBrokerService(_context, this);
+        _lifeJournal = new LifeJournalService(_context);
+        _lifeJournalFinalizer = new LifeJournalFinalizer(
+            _lifeJournal.Store,
+            _lifeJournal.Analyzer,
+            new LifeJournalLogger(_lifeJournal.RootDirectory),
+            _context.Settings.LifeJournal,
+            Path.Combine(_lifeJournal.RootDirectory, "finalizer-state.json"));
         _proxyClient = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false }, disposeHandler: true);
     }
 
@@ -69,6 +81,7 @@ public sealed class MasterAppRuntime : IDisposable
             _context.Log.Info("Runtime", $"Local web host started on {LocalUrl}");
 
             _packageWatcher.Start();
+            _lifeJournalFinalizer.Start();
 
             if (_context.Settings.AutoStartTunnel)
             {
@@ -98,6 +111,15 @@ public sealed class MasterAppRuntime : IDisposable
             catch (Exception ex)
             {
                 _context.Log.Error("Runtime", "Package watcher stop failed.", ex);
+            }
+
+            try
+            {
+                _lifeJournalFinalizer.Dispose();
+            }
+            catch (Exception ex)
+            {
+                _context.Log.Error("Runtime", "LifeJournal finalizer stop failed.", ex);
             }
 
             try
@@ -232,6 +254,7 @@ public sealed class MasterAppRuntime : IDisposable
     public void OpenPublic() => ShellHelper.OpenPath(PublicUrl);
     public void OpenPhoneQr() => ShellHelper.OpenPath($"{LocalUrl}/qr.html");
     public void OpenLogsFolder() => ShellHelper.OpenPath(_context.Paths.LogsDirectory);
+    public void MarkExplicitQuit() => _watchdogStateStore.MarkExplicitQuit();
 
     public object GetStatusResponse()
     {
@@ -394,6 +417,14 @@ public sealed class MasterAppRuntime : IDisposable
                 contentType = "application/octet-stream";
             }
 
+            if (contentType.Contains("text/html", StringComparison.OrdinalIgnoreCase))
+            {
+                var html = await File.ReadAllTextAsync(filePath!, context.RequestAborted);
+                context.Response.ContentType = "text/html; charset=utf-8";
+                await context.Response.WriteAsync(InjectHostedAppChrome(html), context.RequestAborted);
+                return true;
+            }
+
             context.Response.ContentType = contentType;
             await context.Response.SendFileAsync(filePath!);
             return true;
@@ -440,7 +471,7 @@ public sealed class MasterAppRuntime : IDisposable
         app.UseMiddleware<InstalledAppMiddleware>();
         var defaultFiles = new DefaultFilesOptions();
         defaultFiles.DefaultFileNames.Clear();
-        defaultFiles.DefaultFileNames.Add("dashboard.html");
+        defaultFiles.DefaultFileNames.Add("store.html");
         app.UseDefaultFiles(defaultFiles);
         app.UseStaticFiles(new StaticFileOptions
         {
@@ -597,6 +628,144 @@ public sealed class MasterAppRuntime : IDisposable
             }
         });
 
+        app.MapGet("/life", () =>
+        {
+            _context.Log.Ui("Api", "GET /life");
+            _lifeJournalFinalizer.RequestBackgroundCheck();
+            return Results.Content(ReadLifePage(), "text/html; charset=utf-8");
+        });
+
+        app.MapGet("/life/history", () =>
+        {
+            _context.Log.Ui("Api", "GET /life/history");
+            _lifeJournalFinalizer.RequestBackgroundCheck();
+            return Results.Content(ReadLifePage(), "text/html; charset=utf-8");
+        });
+
+        app.MapGet("/api/life/today", async (HttpContext context) =>
+        {
+            _context.Log.Ui("Api", "GET /api/life/today");
+            _lifeJournalFinalizer.RequestBackgroundCheck();
+            return Results.Json(await _lifeJournal.GetTodayAsync(context.RequestAborted));
+        });
+
+        app.MapGet("/api/life/day", async (string date, HttpContext context) =>
+        {
+            _context.Log.Ui("Api", $"GET /api/life/day?date={date}");
+            if (!LifeJournalPathSafety.TryParseDate(date, out var parsedDate))
+            {
+                return Results.BadRequest(new { ok = false, message = "date must be yyyy-MM-dd." });
+            }
+
+            return Results.Json(await _lifeJournal.GetDayAsync(parsedDate, context.RequestAborted));
+        });
+
+        app.MapPost("/api/life/photo", async (HttpContext context) =>
+        {
+            _context.Log.Ui("Api", "POST /api/life/photo");
+            if (!context.Request.HasFormContentType)
+            {
+                return Results.BadRequest(new { ok = false, message = "multipart form data is required." });
+            }
+
+            try
+            {
+                var form = await context.Request.ReadFormAsync(context.RequestAborted);
+                var file = form.Files.GetFile("photo") ?? form.Files.GetFile("image") ?? form.Files.FirstOrDefault();
+                if (file is null)
+                {
+                    return Results.BadRequest(new { ok = false, message = "photo file is required." });
+                }
+
+                DateOnly? requestedDate = null;
+                var dateText = form.TryGetValue("date", out var dateValues) ? dateValues.FirstOrDefault() : null;
+                if (!string.IsNullOrWhiteSpace(dateText))
+                {
+                    if (!LifeJournalPathSafety.TryParseDate(dateText, out var parsedDate))
+                    {
+                        return Results.BadRequest(new { ok = false, message = "date must be yyyy-MM-dd." });
+                    }
+
+                    requestedDate = parsedDate;
+                }
+
+                var day = await _lifeJournal.SavePhotoAsync(file, requestedDate, context.RequestAborted);
+                return Results.Json(new { ok = true, day });
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                return Results.BadRequest(new { ok = false, message = ex.Message });
+            }
+        });
+
+        app.MapPost("/api/life/event", async (LifeEventRequest request, HttpContext context) =>
+        {
+            _context.Log.Ui("Api", "POST /api/life/event");
+            if (string.IsNullOrWhiteSpace(request.Type))
+            {
+                return Results.BadRequest(new { ok = false, message = "type is required." });
+            }
+
+            try
+            {
+                var day = await _lifeJournal.SaveEventAsync(request.Type, context.RequestAborted);
+                return Results.Json(new { ok = true, day });
+            }
+            catch (Exception ex)
+            {
+                return Results.BadRequest(new { ok = false, message = ex.Message });
+            }
+        });
+
+        app.MapPost("/api/life/analyze", async (HttpContext context) =>
+        {
+            _context.Log.Ui("Api", "POST /api/life/analyze");
+            try
+            {
+                LifeAnalyzeRequest? request = null;
+                if ((context.Request.ContentLength ?? 0) > 0)
+                {
+                    request = await JsonSerializer.DeserializeAsync<LifeAnalyzeRequest>(
+                        context.Request.Body,
+                        MasterApp.Storage.JsonOptions.Default,
+                        context.RequestAborted);
+                }
+
+                var date = DateOnly.FromDateTime(DateTimeOffset.Now.DateTime);
+                if (!string.IsNullOrWhiteSpace(request?.Date))
+                {
+                    if (!LifeJournalPathSafety.TryParseDate(request.Date, out date))
+                    {
+                        return Results.BadRequest(new { ok = false, message = "date must be yyyy-MM-dd." });
+                    }
+                }
+
+                var day = await _lifeJournal.AnalyzeDayAsync(date, markFinalized: false, context.RequestAborted);
+                return Results.Json(new { ok = true, day });
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                return Results.BadRequest(new { ok = false, message = ex.Message });
+            }
+        });
+
+        app.MapGet("/api/life/history", async (HttpContext context) =>
+        {
+            _context.Log.Ui("Api", "GET /api/life/history");
+            return Results.Json(await _lifeJournal.GetHistoryAsync(context.RequestAborted));
+        });
+
+        app.MapGet("/api/life/photo/{date}/{filename}", (string date, string filename) =>
+        {
+            _context.Log.Ui("Api", $"GET /api/life/photo/{date}/{filename}");
+            if (!_lifeJournal.TryResolvePhotoPath(date, filename, out var path))
+            {
+                return Results.NotFound();
+            }
+
+            return Results.File(path, "image/jpeg");
+        });
+
         app.MapGet("/api/phone-qr.svg", () =>
         {
             _context.Log.Ui("Api", "GET /api/phone-qr.svg");
@@ -629,6 +798,14 @@ public sealed class MasterAppRuntime : IDisposable
         });
 
         return app;
+    }
+
+    private static string ReadLifePage()
+    {
+        var path = Path.Combine(AppContext.BaseDirectory, "wwwroot", "life.html");
+        return File.Exists(path)
+            ? File.ReadAllText(path)
+            : "<!doctype html><html><body><h1>LifeJournal</h1><p>life.html was not found.</p></body></html>";
     }
 
     private static void CopyRequestHeaders(HttpRequest source, HttpRequestMessage destination)
@@ -795,7 +972,7 @@ public sealed class MasterAppRuntime : IDisposable
             return content;
         }
 
-        return content
+        var rewritten = content
             .Replace("href=\"/", $"href=\"{appPrefix}/", StringComparison.Ordinal)
             .Replace("src=\"/", $"src=\"{appPrefix}/", StringComparison.Ordinal)
             .Replace("action=\"/", $"action=\"{appPrefix}/", StringComparison.Ordinal)
@@ -811,6 +988,50 @@ public sealed class MasterAppRuntime : IDisposable
             .Replace("`/media/", $"`{appPrefix}/media/", StringComparison.Ordinal)
             .Replace("'/media/", $"'{appPrefix}/media/", StringComparison.Ordinal)
             .Replace("\"/media/", $"\"{appPrefix}/media/", StringComparison.Ordinal);
+
+        if (mediaType?.Contains("text/html", StringComparison.OrdinalIgnoreCase) == true)
+        {
+            rewritten = InjectHostedAppChrome(rewritten);
+        }
+
+        return rewritten;
+    }
+
+    private static string InjectHostedAppChrome(string html)
+    {
+        if (string.IsNullOrWhiteSpace(html) ||
+            html.Contains("masterapp-hosted-backtab", StringComparison.OrdinalIgnoreCase))
+        {
+            return html;
+        }
+
+        const string chrome = """
+<style>
+.masterapp-hosted-backtab{position:fixed;left:0;top:50%;transform:translate(-72px,-50%);z-index:2147483647;display:flex;align-items:center;gap:10px;padding:10px 14px 10px 18px;border:none;border-radius:0 18px 18px 0;background:linear-gradient(180deg,rgba(9,14,28,.96),rgba(14,22,44,.98));box-shadow:0 18px 36px rgba(0,0,0,.32);color:#f4f7ff;font:600 14px/1.1 "Segoe UI Variable Text","Segoe UI",sans-serif;letter-spacing:.01em;cursor:pointer;opacity:.92;transition:transform .18s ease,opacity .18s ease;}
+.masterapp-hosted-backtab:hover,.masterapp-hosted-backtab:focus-visible,.masterapp-hosted-backtab.is-open{transform:translate(0,-50%);opacity:1;outline:none;}
+.masterapp-hosted-backtab::before{content:"";width:11px;height:11px;border-left:2px solid currentColor;border-bottom:2px solid currentColor;transform:rotate(45deg);margin-left:2px;}
+.masterapp-hosted-backtab-label{white-space:nowrap;}
+@media (max-width:700px){.masterapp-hosted-backtab{top:auto;bottom:18px;transform:translate(-62px,0);border-radius:18px;left:12px;padding:10px 14px;}.masterapp-hosted-backtab:hover,.masterapp-hosted-backtab:focus-visible,.masterapp-hosted-backtab.is-open{transform:translate(0,0);}}
+</style>
+<button type="button" class="masterapp-hosted-backtab" aria-label="Back to MasterApp" title="Back to MasterApp">
+  <span class="masterapp-hosted-backtab-label">MasterApp</span>
+</button>
+<script>
+(()=>{const button=document.querySelector('.masterapp-hosted-backtab');if(!button){return;}let armed=false;const disarm=()=>{armed=false;button.classList.remove('is-open');};button.addEventListener('click',()=>{if(!armed){armed=true;button.classList.add('is-open');window.setTimeout(disarm,2200);return;}window.location.href='/store.html';});button.addEventListener('blur',()=>window.setTimeout(disarm,120));document.addEventListener('keydown',event=>{if(event.key==='Escape'){disarm();}});})();
+</script>
+""";
+
+        if (html.Contains("</body>", StringComparison.OrdinalIgnoreCase))
+        {
+            return html.Replace("</body>", chrome + "\n</body>", StringComparison.OrdinalIgnoreCase);
+        }
+
+        if (html.Contains("</html>", StringComparison.OrdinalIgnoreCase))
+        {
+            return html.Replace("</html>", chrome + "\n</html>", StringComparison.OrdinalIgnoreCase);
+        }
+
+        return html + chrome;
     }
 
     private static string RewriteLocationHeader(string value, string appPrefix)
@@ -1168,4 +1389,8 @@ Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
         File.Copy(source, destination, overwrite: true);
     }
 
+    private sealed class LifeEventRequest
+    {
+        public string Type { get; set; } = string.Empty;
+    }
 }

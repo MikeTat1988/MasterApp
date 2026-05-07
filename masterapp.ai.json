@@ -1,0 +1,27 @@
+{
+  "summary": "MasterApp is a Windows tray host that serves a browser UI from src/MasterApp/wwwroot, orchestrates installable apps, and brokers Codex/Ollama runs through Hosting.",
+  "preferredEntryPoints": [
+    "src/MasterApp/Hosting/MasterAppRuntime.cs",
+    "src/MasterApp/Hosting/CodexBrokerService.cs",
+    "src/MasterApp/Hosting/CodexBrokerService.Execution.cs",
+    "src/MasterApp/wwwroot/masterapp-ui.js",
+    "src/MasterApp/wwwroot/masterapp-ui.css"
+  ],
+  "hotspotFiles": [
+    "src/MasterApp/wwwroot/masterapp-ui.js",
+    "src/MasterApp/wwwroot/masterapp-ui.css",
+    "src/MasterApp/Hosting/MasterAppRuntime.cs",
+    "src/MasterApp/Hosting/CodexBrokerService.Execution.cs",
+    "src/MasterApp/Hosting/CodexBrokerService.Metadata.cs"
+  ],
+  "investigationHints": [
+    "If the issue is visible in the browser UI, start in src/MasterApp/wwwroot before assuming native WinForms or WPF resources.",
+    "If the issue involves Codex or Ollama runs, inspect the broker prompt, workspace selection, step budget, and approval loop under src/MasterApp/Hosting.",
+    "If the issue involves installed apps, read app.manifest.json first and check whether the workspace is a static, portable, or source package."
+  ],
+  "avoidPatterns": [
+    "Do not start by scanning the whole repository recursively.",
+    "Do not assume rg exists before checking.",
+    "Do not inspect App.xaml unless a prior clue shows that file exists."
+  ]
+}

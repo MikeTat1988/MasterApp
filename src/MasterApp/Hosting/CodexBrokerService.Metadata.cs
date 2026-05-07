@@ -1,4 +1,5 @@
 using MasterApp.Models;
+using MasterApp.Packages;
 using MasterApp.Storage;
 using System.Text;
 using System.Text.Json;
@@ -11,16 +12,42 @@ public sealed partial class CodexBrokerService
     private const int MaxLiveLogLines = 240;
     private const int MaxPersistedLogLines = 120;
     private const int MaxApprovalLogLines = 80;
-    private const int MaxDecisionSteps = 6;
     private const int MaxPromptOutputCharacters = 8_000;
+    private static readonly Version Gpt55MinimumCliVersion = new(0, 128, 0);
 
     private static readonly Regex ModelRegex = new(@"(?m)^\s*model\s*=\s*""(?<model>[^""]+)""\s*$", RegexOptions.Compiled);
+    private static readonly Regex VersionNumberRegex = new(@"(?<version>\d+\.\d+\.\d+)", RegexOptions.Compiled);
 
     private readonly string _codexHome = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".codex");
     private readonly string _codexConfigFile = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".codex", "config.toml");
     private readonly string _codexModelsCacheFile = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".codex", "models_cache.json");
     private readonly string _codexSessionIndexFile = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".codex", "session_index.jsonl");
     private readonly string _codexSessionsDirectory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".codex", "sessions");
+
+    private int GetMaxDecisionSteps(CodexChatRun run)
+    {
+        var workspace = FindWorkspaceChoice(run.WorkspacePath);
+        var manifest = workspace is not null &&
+                       string.Equals(workspace.Kind, "installed-app", StringComparison.OrdinalIgnoreCase)
+            ? TryLoadWorkspaceManifest(run.WorkspacePath)
+            : null;
+        var promptContext = CodexWorkspacePolicy.CreatePromptContext(
+            run.WorkspacePath,
+            workspace?.Kind,
+            workspace?.AppId,
+            workspace?.Version,
+            manifest);
+
+        return CodexWorkspacePolicy.CalculateDecisionStepBudget(
+            run.Provider,
+            run.TaskMode,
+            workspace?.Kind,
+            run.Prompt,
+            _context.Settings.CodexMaxDecisionSteps,
+            _context.Settings.OllamaMaxDecisionSteps,
+            promptContext.IsMasterAppWorkspace,
+            promptContext.HasExplicitHints);
+    }
 
     private void RefreshCliState()
     {
@@ -54,61 +81,14 @@ public sealed partial class CodexBrokerService
 
     private CodexCliResolutionState ResolveCliExecutable(string? configuredCommand)
     {
-        var attempted = new List<string>();
-        var resolvedPath = string.Empty;
-        var requested = configuredCommand?.Trim();
-
-        if (!string.IsNullOrWhiteSpace(requested))
-        {
-            attempted.Add(requested);
-            if (TryResolveConfiguredPath(requested, out var configuredPath))
-            {
-                resolvedPath = configuredPath!;
-            }
-        }
-
-        if (string.IsNullOrWhiteSpace(resolvedPath))
-        {
-            var sandboxPath = Path.Combine(_codexHome, ".sandbox-bin", "codex.exe");
-            attempted.Add(sandboxPath);
-            if (File.Exists(sandboxPath))
-            {
-                resolvedPath = sandboxPath;
-            }
-        }
-
-        if (string.IsNullOrWhiteSpace(resolvedPath))
-        {
-            foreach (var match in FindCommandOnPath(string.IsNullOrWhiteSpace(requested) ? "codex" : requested!))
-            {
-                attempted.Add(match);
-                if (File.Exists(match))
-                {
-                    resolvedPath = match;
-                    break;
-                }
-            }
-        }
-
-        if (string.IsNullOrWhiteSpace(resolvedPath))
-        {
-            return new CodexCliResolutionState
-            {
-                Status = "missing",
-                ResolvedExecutablePath = null,
-                AttemptedPaths = attempted.Distinct(StringComparer.OrdinalIgnoreCase).ToList(),
-                LastError = BuildResolutionError(attempted),
-                ResolvedAtUtc = DateTimeOffset.UtcNow
-            };
-        }
-
+        var resolution = CodexExecutableResolver.Resolve(configuredCommand);
         return new CodexCliResolutionState
         {
-            Status = "ready",
-            ResolvedExecutablePath = resolvedPath,
-            AttemptedPaths = attempted.Distinct(StringComparer.OrdinalIgnoreCase).ToList(),
-            LastError = null,
-            ResolvedAtUtc = DateTimeOffset.UtcNow
+            Status = resolution.Status,
+            ResolvedExecutablePath = resolution.ResolvedExecutablePath,
+            AttemptedPaths = resolution.AttemptedPaths.ToList(),
+            LastError = resolution.LastError,
+            ResolvedAtUtc = resolution.ResolvedAtUtc
         };
     }
 
@@ -116,8 +96,8 @@ public sealed partial class CodexBrokerService
     {
         try
         {
-            var help = RunProcessCapture(executablePath, new[] { "exec", "--help" }, Directory.GetCurrentDirectory(), 15_000);
-            var version = RunProcessCapture(executablePath, new[] { "--version" }, Directory.GetCurrentDirectory(), 10_000);
+            var help = RunProcessCapture(executablePath, new[] { "exec", "--help" }, Directory.GetCurrentDirectory(), 15_000, Encoding.UTF8);
+            var version = RunProcessCapture(executablePath, new[] { "--version" }, Directory.GetCurrentDirectory(), 10_000, Encoding.UTF8);
             var combined = $"{help.StandardOutput}\n{help.StandardError}";
             var versionText = TrimForLog($"{version.StandardOutput} {version.StandardError}".Trim(), 120);
 
@@ -259,6 +239,23 @@ public sealed partial class CodexBrokerService
 
     private string GetBuildCommand(string workspacePath, string runId)
     {
+        var workspace = FindWorkspaceChoice(workspacePath);
+        if (workspace is not null &&
+            string.Equals(workspace.Kind, "installed-app", StringComparison.OrdinalIgnoreCase))
+        {
+            var manifest = TryLoadWorkspaceManifest(workspacePath);
+            var appCommand = manifest?.Publish?.Command?.Trim();
+            if (string.IsNullOrWhiteSpace(appCommand))
+            {
+                appCommand = manifest?.Build?.InstallCommand?.Trim();
+            }
+
+            if (!string.IsNullOrWhiteSpace(appCommand))
+            {
+                return $"cmd.exe /c \"{appCommand}\"";
+            }
+        }
+
         var configured = _context.Settings.PreferredBuildCommand?.Trim();
         var command = string.IsNullOrWhiteSpace(configured)
             ? "dotnet build .\\src\\MasterApp\\MasterApp.csproj -c Debug"
@@ -280,6 +277,47 @@ public sealed partial class CodexBrokerService
     private string GetRestartCommand(string workspacePath)
     {
         return _runtime.GetRestartCommand(workspacePath);
+    }
+
+    private CodexWorkspaceChoice? FindWorkspaceChoice(string workspacePath)
+    {
+        var fullPath = Path.GetFullPath(workspacePath);
+        return GetWorkspaceChoiceRecords()
+            .FirstOrDefault(item => string.Equals(Path.GetFullPath(item.Path), fullPath, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private WorkspacePromptContext BuildWorkspacePromptContext(string workspacePath)
+    {
+        var workspace = FindWorkspaceChoice(workspacePath);
+        var manifest = workspace is not null &&
+                       string.Equals(workspace.Kind, "installed-app", StringComparison.OrdinalIgnoreCase)
+            ? TryLoadWorkspaceManifest(workspacePath)
+            : null;
+
+        return CodexWorkspacePolicy.CreatePromptContext(
+            workspacePath,
+            workspace?.Kind,
+            workspace?.AppId,
+            workspace?.Version,
+            manifest);
+    }
+
+    private static AppManifest? TryLoadWorkspaceManifest(string workspacePath)
+    {
+        try
+        {
+            var manifestPath = Path.Combine(workspacePath, "app.manifest.json");
+            if (!File.Exists(manifestPath))
+            {
+                return null;
+            }
+
+            return JsonSerializer.Deserialize<AppManifest>(File.ReadAllText(manifestPath), JsonOptions.Default);
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     private string? TryReadCurrentCodexModel()
@@ -362,6 +400,7 @@ public sealed partial class CodexBrokerService
                         .Select(level => level.Effort!)
                         .ToList() ?? new List<string>()
                 })
+                .Where(model => IsCodexModelSupportedByResolvedCli(model.Slug))
                 .OrderBy(model => model.DisplayName, StringComparer.OrdinalIgnoreCase)
                 .ToArray();
 
@@ -376,7 +415,7 @@ public sealed partial class CodexBrokerService
     private IReadOnlyList<CodexModelInfo> FallbackModelList()
     {
         var current = TryReadCurrentCodexModel();
-        return string.IsNullOrWhiteSpace(current)
+        return string.IsNullOrWhiteSpace(current) || !IsCodexModelSupportedByResolvedCli(current)
             ? Array.Empty<CodexModelInfo>()
             : new[]
             {
@@ -388,6 +427,135 @@ public sealed partial class CodexBrokerService
                     SupportedReasoningLevels = new List<string>()
                 }
             };
+    }
+
+    private string ResolveSupportedCodexModel(string? requestedModel)
+    {
+        var requested = requestedModel?.Trim() ?? string.Empty;
+        if (!string.IsNullOrWhiteSpace(requested) && IsCodexModelSupportedByResolvedCli(requested))
+        {
+            return requested;
+        }
+
+        var available = GetAvailableCodexModels();
+        var fallback = available.FirstOrDefault(model => string.Equals(model.Slug, "gpt-5.4", StringComparison.OrdinalIgnoreCase))
+            ?? available.FirstOrDefault(model => string.Equals(model.Slug, "gpt-5.4-mini", StringComparison.OrdinalIgnoreCase))
+            ?? available.FirstOrDefault(model => string.Equals(model.Slug, "gpt-5.3-codex", StringComparison.OrdinalIgnoreCase))
+            ?? available.FirstOrDefault();
+
+        return fallback?.Slug ?? requested;
+    }
+
+    private bool IsCodexModelSupportedByResolvedCli(string? model)
+    {
+        if (string.IsNullOrWhiteSpace(model))
+        {
+            return false;
+        }
+
+        if (!string.Equals(model.Trim(), "gpt-5.5", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        var version = TryParseVersionText(_probeState.Version);
+        return version is not null && version >= Gpt55MinimumCliVersion;
+    }
+
+    private static Version? TryParseVersionText(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return null;
+        }
+
+        var match = VersionNumberRegex.Match(text);
+        return match.Success && Version.TryParse(match.Groups["version"].Value, out var version)
+            ? version
+            : null;
+    }
+
+    private object BuildUsageSummary(CodexRuntimeState runtime, string currentProvider, string currentModel)
+    {
+        var provider = NormalizeProvider(currentProvider, currentModel);
+        var evaluatedAtUtc = DateTimeOffset.UtcNow;
+        var isUnlimited = IsOllamaProvider(provider);
+        var fiveHourWindowStart = evaluatedAtUtc.AddHours(-5);
+        var weeklyWindowStart = evaluatedAtUtc.AddDays(-7);
+
+        var requestEvents = runtime.Sessions
+            .Where(session => !IsOllamaProvider(session.Provider))
+            .SelectMany(session => session.Messages
+                .Where(message =>
+                    string.Equals(message.Role, "user", StringComparison.OrdinalIgnoreCase) &&
+                    IsRecentTimestampPlausible(message.CreatedAtUtc))
+                .Select(message => message.CreatedAtUtc))
+            .ToArray();
+
+        var usedFiveHours = requestEvents.Count(timestamp => timestamp >= fiveHourWindowStart);
+        var usedWeek = requestEvents.Count(timestamp => timestamp >= weeklyWindowStart);
+        var fiveHourLimit = Math.Max(1, _context.Settings.CodexUsageRequestsPer5Hours);
+        var weeklyLimit = Math.Max(fiveHourLimit, _context.Settings.CodexUsageRequestsPerWeek);
+
+        if (isUnlimited)
+        {
+            return new
+            {
+                provider,
+                model = currentModel,
+                isUnlimited = true,
+                summary = "Unlimited (local Ollama/Llama)",
+                items = new object[]
+                {
+                    new
+                    {
+                        label = "5h",
+                        used = (int?)null,
+                        limit = (int?)null,
+                        display = "Unlimited (local)",
+                        detail = "Local Ollama/Llama runs are not quota-limited by MasterApp."
+                    },
+                    new
+                    {
+                        label = "Weekly",
+                        used = (int?)null,
+                        limit = (int?)null,
+                        display = "Unlimited (local)",
+                        detail = "Usage is informational only for local models."
+                    }
+                }
+            };
+        }
+
+        return new
+        {
+            provider,
+            model = currentModel,
+            isUnlimited = false,
+            evaluatedAtUtc,
+            summary = $"{usedFiveHours} / {fiveHourLimit} requests in 5h",
+            items = new object[]
+            {
+                new
+                {
+                    label = "5h",
+                    used = usedFiveHours,
+                    limit = fiveHourLimit,
+                    windowStartUtc = fiveHourWindowStart,
+                    display = $"{usedFiveHours} / {fiveHourLimit} requests",
+                    detail = "Rolling 5-hour request count."
+                },
+                new
+                {
+                    label = "Weekly",
+                    used = usedWeek,
+                    limit = weeklyLimit,
+                    windowStartUtc = weeklyWindowStart,
+                    display = $"{usedWeek} / {weeklyLimit} requests",
+                    detail = "Rolling 7-day request count."
+                }
+            }
+        };
     }
 
     private sealed class CodexWorkspaceChoice

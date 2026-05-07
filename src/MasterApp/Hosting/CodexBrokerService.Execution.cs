@@ -9,6 +9,189 @@ namespace MasterApp.Hosting;
 
 public sealed partial class CodexBrokerService
 {
+    private async Task RunSharedCodexTurnAsync(CodexChatRun run, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(_resolvedExecutablePath))
+        {
+            throw new InvalidOperationException("Codex executable was not resolved.");
+        }
+
+        var tempDirectory = Path.Combine(_context.Paths.TempDirectory, "codex-shared");
+        Directory.CreateDirectory(tempDirectory);
+
+        var outputPath = Path.Combine(tempDirectory, $"last-message-{run.Id}.txt");
+        if (File.Exists(outputPath))
+        {
+            File.Delete(outputPath);
+        }
+
+        var args = BuildSharedCodexArguments(run, outputPath);
+        AppendLog(run, "system", string.IsNullOrWhiteSpace(run.SharedSessionId)
+            ? "Running one shared Codex turn."
+            : $"Running one shared Codex turn in session {run.SharedSessionId}.");
+        PublishRun(run);
+
+        var eventLines = new List<string>();
+        var exitCode = await RunProcessAsync(
+            _resolvedExecutablePath!,
+            args,
+            run.WorkspacePath,
+            line =>
+            {
+                eventLines.Add(line);
+                ApplySharedCodexEvent(run, line);
+                AppendLog(run, "codex", line);
+                return Task.CompletedTask;
+            },
+            line =>
+            {
+                eventLines.Add(line);
+                ApplySharedCodexEvent(run, line);
+                AppendLog(run, "codex", line);
+                return Task.CompletedTask;
+            },
+            cancellationToken,
+            30 * 60 * 1000,
+            Encoding.UTF8);
+
+        if (exitCode != 0)
+        {
+            throw new InvalidOperationException(BuildCodexFailureMessage(exitCode, eventLines));
+        }
+
+        var response = File.Exists(outputPath)
+            ? (await File.ReadAllTextAsync(outputPath, cancellationToken)).Trim()
+            : string.Empty;
+        run.ResponseText = response;
+        run.Summary = TrimForLog(string.IsNullOrWhiteSpace(response) ? "Completed." : response, 240);
+        run.Status = "completed";
+        run.UpdatedAtUtc = DateTimeOffset.UtcNow;
+        if (!string.IsNullOrWhiteSpace(run.SharedSessionId))
+        {
+            AdoptSharedSessionId(run);
+        }
+
+        PublishRun(run);
+    }
+
+    private List<string> BuildSharedCodexArguments(CodexChatRun run, string outputPath)
+    {
+        var args = new List<string>();
+        if (string.IsNullOrWhiteSpace(run.SharedSessionId))
+        {
+            args.Add("exec");
+            args.Add("--json");
+            args.Add("--skip-git-repo-check");
+            args.Add("-o");
+            args.Add(outputPath);
+            args.Add("-C");
+            args.Add(run.WorkspacePath);
+            args.Add("-s");
+            args.Add("workspace-write");
+            AddTrustedWorkspaceArguments(args, run.WorkspacePath);
+            if (IsOllamaProvider(run.Provider))
+            {
+                args.Add("--oss");
+                args.Add("--local-provider");
+                args.Add("ollama");
+            }
+
+            if (!string.IsNullOrWhiteSpace(run.Model))
+            {
+                args.Add("-m");
+                args.Add(run.Model);
+            }
+        }
+        else
+        {
+            args.Add("exec");
+            args.Add("resume");
+            args.Add("--json");
+            args.Add("--skip-git-repo-check");
+            args.Add("-o");
+            args.Add(outputPath);
+            if (!string.IsNullOrWhiteSpace(run.Model))
+            {
+                args.Add("-m");
+                args.Add(run.Model);
+            }
+
+            AddTrustedWorkspaceArguments(args, run.WorkspacePath);
+            args.Add(run.SharedSessionId);
+        }
+
+        args.Add(BuildSharedCodexPrompt(run));
+        return args;
+    }
+
+    private void AddTrustedWorkspaceArguments(List<string> args, string primaryWorkspacePath)
+    {
+        var primary = Path.GetFullPath(primaryWorkspacePath);
+        foreach (var path in GetAllowedWorkspacePaths())
+        {
+            var full = Path.GetFullPath(path);
+            if (string.Equals(full, primary, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            args.Add("--add-dir");
+            args.Add(full);
+        }
+    }
+
+    private string BuildSharedCodexPrompt(CodexChatRun run)
+    {
+        var builder = new StringBuilder();
+        builder.AppendLine("You are running inside the MasterApp Codex panel.");
+        builder.AppendLine("Important host contract:");
+        builder.AppendLine("- Do not stop, kill, taskkill, or raw-restart the MasterApp process yourself.");
+        builder.AppendLine("- Do not run Stop-Process MasterApp, taskkill /IM MasterApp.exe, or scripts that terminate the host.");
+        builder.AppendLine("- If MasterApp must restart after your code changes, finish the work and say that a MasterApp relaunch is required; the host will schedule the relaunch after your turn is safely persisted.");
+        builder.AppendLine("- Build and file changes are fine when needed, but keep commands scoped to the selected workspace unless the user explicitly approves broader access.");
+        builder.AppendLine();
+        builder.AppendLine("User request:");
+        builder.AppendLine(run.Prompt);
+        return builder.ToString();
+    }
+
+    private void ApplySharedCodexEvent(CodexChatRun run, string line)
+    {
+        if (string.IsNullOrWhiteSpace(line))
+        {
+            return;
+        }
+
+        try
+        {
+            using var document = JsonDocument.Parse(line);
+            var root = document.RootElement;
+            var type = root.TryGetProperty("type", out var typeProp) ? typeProp.GetString() : null;
+            if (string.Equals(type, "session_meta", StringComparison.OrdinalIgnoreCase) &&
+                root.TryGetProperty("payload", out var payload) &&
+                payload.TryGetProperty("id", out var idProp))
+            {
+                var sessionId = idProp.GetString();
+                if (!string.IsNullOrWhiteSpace(sessionId))
+                {
+                    run.SharedSessionId = sessionId!;
+                    AdoptSharedSessionId(run);
+                }
+            }
+        }
+        catch
+        {
+            // Non-JSON lines are expected from some Codex modes.
+        }
+    }
+
+    private async Task<CodexDecisionEnvelope> AskBrokerForDecisionAsync(CodexChatRun run, CancellationToken cancellationToken)
+    {
+        return IsOllamaProvider(run.Provider)
+            ? await AskOllamaForDecisionAsync(run, cancellationToken)
+            : await AskCodexForDecisionAsync(run, cancellationToken);
+    }
+
     private async Task<CodexDecisionEnvelope> AskCodexForDecisionAsync(CodexChatRun run, CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(_resolvedExecutablePath))
@@ -68,7 +251,8 @@ public sealed partial class CodexBrokerService
                 return Task.CompletedTask;
             },
             cancellationToken,
-            10 * 60 * 1000);
+            10 * 60 * 1000,
+            Encoding.UTF8);
 
         if (!File.Exists(outputPath))
         {
@@ -92,6 +276,24 @@ public sealed partial class CodexBrokerService
         }
     }
 
+    private async Task<CodexDecisionEnvelope> AskOllamaForDecisionAsync(CodexChatRun run, CancellationToken cancellationToken)
+    {
+        var prompt = BuildDecisionPrompt(run);
+        var finalPrompt = $"{prompt}\n\nReturn a single raw JSON object only. Do not use markdown fences, prose, or explanations.";
+        var json = await RequestOllamaTextAsync(run.Model, finalPrompt, cancellationToken);
+        var normalized = ExtractJsonObject(json);
+
+        try
+        {
+            return JsonSerializer.Deserialize<CodexDecisionEnvelope>(normalized, JsonOptions.Default)
+                   ?? throw new InvalidOperationException("Ollama returned an invalid decision.");
+        }
+        catch (JsonException ex)
+        {
+            throw new InvalidOperationException($"Ollama decision could not be parsed: {ex.Message}");
+        }
+    }
+
     private string BuildDecisionPrompt(CodexChatRun run)
     {
         var builder = new StringBuilder();
@@ -107,11 +309,17 @@ public sealed partial class CodexBrokerService
         builder.AppendLine("- Use restart only when the work is complete and MasterApp should schedule a safe relaunch next.");
         builder.AppendLine("- Restart decisions must include the final user-facing response in response.");
         builder.AppendLine("- Build and restart happen through MasterApp, not by raw self-management commands.");
+        builder.AppendLine("- A command exiting successfully does not prove that a file was changed.");
+        builder.AppendLine("- If an edit attempt produced no confirmed file change yet, treat it as a no-op and keep investigating.");
+        builder.AppendLine("- For UI or code fixes, identify the exact target file before editing; do not rely on blind wildcard replacements.");
+        builder.AppendLine("- Do not choose build, restart, or final-success after an edit attempt unless the relevant file change is visible in Changed files so far, or the user asked only for inspection/restart.");
         builder.AppendLine("- Never ask for multiple commands at once.");
         builder.AppendLine("- Keep commands Windows PowerShell compatible.");
         builder.AppendLine("- Prefer specific, minimal commands.");
         builder.AppendLine("- Investigate only when investigation is actually necessary to answer the user.");
         builder.AppendLine("- Avoid broad repository scans and avoid searching the whole workspace by default.");
+        builder.AppendLine("- Do not repeat the same command, the same path guess, or the same failed inspection twice.");
+        builder.AppendLine("- If a path probe fails or returns no useful result, pivot to a different concrete file or directory based on prior evidence.");
         builder.AppendLine("- Do not use commands like Select-String -Path * or recursive wildcard scans unless the user explicitly asked to investigate.");
         builder.AppendLine("- Do not assume rg is available; if search is needed, prefer targeted PowerShell file reads or verify the command exists first.");
         builder.AppendLine("- Read-only inspection commands may be auto-approved when they stay in the workspace and avoid sensitive files.");
@@ -148,12 +356,62 @@ public sealed partial class CodexBrokerService
 
         builder.AppendLine("- When investigation is needed, prefer simple file-scoped read-only commands such as Get-Content, Select-String, Test-Path, Get-ChildItem, git status, or git diff.");
         builder.AppendLine();
+        var workspaceChoice = FindWorkspaceChoice(run.WorkspacePath);
+        var workspaceContext = BuildWorkspacePromptContext(run.WorkspacePath);
         builder.AppendLine($"Current workspace: {run.WorkspacePath}");
         builder.AppendLine($"Current model: {run.Model}");
+        builder.AppendLine($"Current workspace kind: {workspaceChoice?.Kind ?? "workspace"}");
+        foreach (var line in workspaceContext.PromptLines)
+        {
+            builder.AppendLine(line);
+        }
         builder.AppendLine("Allowed workspaces:");
         foreach (var workspace in GetWorkspaceChoiceRecords())
         {
             builder.AppendLine($"- {workspace.Path} ({workspace.Kind})");
+        }
+
+        if (workspaceContext.IsMasterAppWorkspace)
+        {
+            builder.AppendLine();
+            builder.AppendLine("MasterApp workspace hints:");
+            builder.AppendLine("- MasterApp's visible application UI is primarily served from src/MasterApp/wwwroot.");
+            builder.AppendLine("- For tab buttons, settings icons, dashboard controls, and app shell visuals, inspect src/MasterApp/wwwroot/masterapp-ui.js, src/MasterApp/wwwroot/masterapp-ui.css, dashboard.html, or related assets before assuming XAML/WPF resource files.");
+            builder.AppendLine("- Do not probe App.xaml unless a prior command proved that file exists.");
+        }
+
+        if (workspaceChoice is not null &&
+            string.Equals(workspaceChoice.Kind, "installed-app", StringComparison.OrdinalIgnoreCase))
+        {
+            var manifest = TryLoadWorkspaceManifest(run.WorkspacePath);
+            builder.AppendLine();
+            builder.AppendLine("Installed app packaging rules:");
+            builder.AppendLine($"- Incoming package folder: {_context.Settings.IncomingFolder}");
+            builder.AppendLine($"- Published artifacts folder: {_context.Settings.PublishedFolder}");
+            builder.AppendLine("- This workspace is an installed MasterApp app package, not the main MasterApp repo.");
+            builder.AppendLine("- If the user asks to fix this app, the work is not complete after editing files in place.");
+            builder.AppendLine("- After the fix, create an updated zip package with app.manifest.json at the zip root and place that zip in the incoming package folder so MasterApp can ingest the update.");
+            builder.AppendLine("- Do not claim success for an installed-app fix until the replacement zip exists in the incoming package folder, unless the user explicitly asked only for investigation.");
+            builder.AppendLine("- Do not restart MasterApp as a substitute for packaging the installed app update.");
+            if (manifest is not null)
+            {
+                builder.AppendLine($"- App manifest type: {manifest.AppType}");
+                if (!string.IsNullOrWhiteSpace(manifest.Publish?.Command))
+                {
+                    builder.AppendLine($"- Manifest publish command: {TrimForLog(manifest.Publish.Command, 240)}");
+                }
+                else if (!string.IsNullOrWhiteSpace(manifest.Build?.InstallCommand))
+                {
+                    builder.AppendLine($"- Manifest build command: {TrimForLog(manifest.Build.InstallCommand, 240)}");
+                }
+
+                if (!string.IsNullOrWhiteSpace(manifest.Publish?.OutputPath))
+                {
+                    builder.AppendLine($"- Manifest publish output: {manifest.Publish.OutputPath}");
+                }
+
+                builder.AppendLine("- For source apps, prefer the app's manifest publish/build command for validation when needed, then package the full app root for ingestion.");
+            }
         }
 
         builder.AppendLine();
@@ -168,6 +426,13 @@ public sealed partial class CodexBrokerService
             {
                 builder.AppendLine($"- {file}");
             }
+        }
+        else
+        {
+            builder.AppendLine();
+            builder.AppendLine("Changed files so far: none");
+            builder.AppendLine("- If you expected an edit already, that edit did not land yet.");
+            builder.AppendLine("- Do not build, restart, or claim the fix is complete until you can point to the concrete changed file.");
         }
 
         if (run.ApprovalHistory.Count > 0)
@@ -365,7 +630,7 @@ public sealed partial class CodexBrokerService
         var workingDirectory = string.IsNullOrWhiteSpace(decision.WorkingDirectory)
             ? run.WorkspacePath
             : Path.GetFullPath(decision.WorkingDirectory);
-        EnsureWorkingDirectoryAllowed(workingDirectory);
+        var workspaceAccess = CodexWorkspacePolicy.EvaluateApprovalWorkspaceAccess(workingDirectory, GetAllowedWorkspacePaths());
 
         var command = kind switch
         {
@@ -387,6 +652,9 @@ public sealed partial class CodexBrokerService
             Summary = string.IsNullOrWhiteSpace(decision.Summary) ? GetDefaultApprovalSummary(kind) : decision.Summary.Trim(),
             Command = command,
             WorkingDirectory = workingDirectory,
+            IsWorkingDirectoryAllowed = workspaceAccess.IsAllowed,
+            CanTrustWorkspace = workspaceAccess.CanTrustWorkspace,
+            TrustWorkspacePath = workspaceAccess.TrustWorkspacePath,
             RequestedAtUtc = DateTimeOffset.UtcNow
         };
     }
@@ -425,8 +693,7 @@ public sealed partial class CodexBrokerService
         }
 
         var normalized = command.ToLowerInvariant();
-        if (normalized.Contains(';') ||
-            normalized.Contains("&&", StringComparison.Ordinal) ||
+        if (normalized.Contains("&&", StringComparison.Ordinal) ||
             normalized.Contains("||", StringComparison.Ordinal) ||
             normalized.Contains('>') ||
             normalized.Contains('<') ||
@@ -436,17 +703,92 @@ public sealed partial class CodexBrokerService
             return false;
         }
 
+        if (ContainsSensitiveMarker(normalized) || ContainsMutatingMarker(normalized))
+        {
+            return false;
+        }
+
+        var segments = command
+            .Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Where(segment => !string.IsNullOrWhiteSpace(segment))
+            .ToArray();
+
+        if (segments.Length == 0)
+        {
+            return false;
+        }
+
+        return segments.All(IsSafeReadOnlySegment);
+    }
+
+    private static bool IsSafeReadOnlySegment(string segment)
+    {
+        var normalized = segment.Trim().ToLowerInvariant();
+        if (string.IsNullOrWhiteSpace(normalized))
+        {
+            return false;
+        }
+
+        if (ContainsSensitiveMarker(normalized) || ContainsMutatingMarker(normalized))
+        {
+            return false;
+        }
+
+        if (normalized.Contains("&&", StringComparison.Ordinal) ||
+            normalized.Contains("||", StringComparison.Ordinal) ||
+            normalized.Contains('>') ||
+            normalized.Contains('<') ||
+            normalized.Contains("`n", StringComparison.Ordinal) ||
+            normalized.Contains("`r", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        if (normalized.StartsWith("$"))
+        {
+            return normalized.Contains("get-childitem", StringComparison.Ordinal) ||
+                   normalized.Contains("get-content", StringComparison.Ordinal) ||
+                   normalized.Contains("select-string", StringComparison.Ordinal) ||
+                   normalized.Contains("test-path", StringComparison.Ordinal) ||
+                   normalized.Contains("resolve-path", StringComparison.Ordinal) ||
+                   normalized.Contains("get-item", StringComparison.Ordinal) ||
+                   normalized.Contains("get-location", StringComparison.Ordinal) ||
+                   normalized.Contains("write-output", StringComparison.Ordinal);
+        }
+
+        if (normalized.StartsWith("if ", StringComparison.Ordinal) || normalized.StartsWith("if(", StringComparison.Ordinal))
+        {
+            return normalized.Contains("get-childitem", StringComparison.Ordinal) ||
+                   normalized.Contains("get-content", StringComparison.Ordinal) ||
+                   normalized.Contains("select-string", StringComparison.Ordinal) ||
+                   normalized.Contains("test-path", StringComparison.Ordinal) ||
+                   normalized.Contains("resolve-path", StringComparison.Ordinal) ||
+                   normalized.Contains("write-output", StringComparison.Ordinal);
+        }
+
+        string[] safePrefixes =
+        {
+            "get-childitem", "get-content", "select-string", "test-path", "resolve-path",
+            "get-item", "get-location", "git status", "git diff", "dotnet --info",
+            "type ", "dir ", "write-output"
+        };
+
+        return safePrefixes.Any(prefix => normalized.StartsWith(prefix, StringComparison.Ordinal));
+    }
+
+    private static bool ContainsSensitiveMarker(string normalized)
+    {
         string[] sensitiveMarkers =
         {
             "secret", "token", "password", "credential", ".env", "secrets.json", "runtime-state",
             "id_rsa", "id_ed25519", "appdata", "localappdata", "$env:", "ssh", "onedrive"
         };
 
-        if (sensitiveMarkers.Any(normalized.Contains))
-        {
-            return false;
-        }
+        return sensitiveMarkers.Any(normalized.Contains);
+    }
 
+    private static bool ContainsMutatingMarker(string normalized)
+    {
         string[] mutatingMarkers =
         {
             "remove-item", "set-content", "add-content", "out-file", "move-item", "copy-item",
@@ -456,18 +798,7 @@ public sealed partial class CodexBrokerService
             "invoke-restmethod", "curl ", "wget ", "npm ", "pnpm ", "yarn ", "del ", "erase "
         };
 
-        if (mutatingMarkers.Any(normalized.Contains))
-        {
-            return false;
-        }
-
-        string[] safePrefixes =
-        {
-            "get-childitem", "get-content", "select-string", "test-path", "resolve-path",
-            "get-item", "get-location", "git status", "git diff", "dotnet --info", "type ", "dir "
-        };
-
-        return safePrefixes.Any(prefix => normalized.StartsWith(prefix, StringComparison.Ordinal));
+        return mutatingMarkers.Any(normalized.Contains);
     }
 
     private static void WriteDecisionSchema(string path)
@@ -492,10 +823,68 @@ public sealed partial class CodexBrokerService
 
     private static string BuildCodexFailureMessage(int exitCode, IReadOnlyList<string> eventLines)
     {
+        var extracted = eventLines
+            .Select(TryExtractCodexErrorMessage)
+            .FirstOrDefault(message => !string.IsNullOrWhiteSpace(message));
+        if (!string.IsNullOrWhiteSpace(extracted))
+        {
+            return $"Codex exited with code {exitCode}. {TrimForLog(extracted, 900)}";
+        }
+
         var detail = eventLines.Where(line => !string.IsNullOrWhiteSpace(line)).TakeLast(12).ToArray();
         return detail.Length == 0
             ? $"Codex exited with code {exitCode}."
             : $"Codex exited with code {exitCode}. {TrimForLog(string.Join(" | ", detail), 900)}";
+    }
+
+    private static string? TryExtractCodexErrorMessage(string line)
+    {
+        if (string.IsNullOrWhiteSpace(line))
+        {
+            return null;
+        }
+
+        try
+        {
+            using var document = JsonDocument.Parse(line);
+            var root = document.RootElement;
+            if (root.TryGetProperty("message", out var messageProp) &&
+                messageProp.ValueKind == JsonValueKind.String)
+            {
+                return messageProp.GetString();
+            }
+
+            if (root.TryGetProperty("error", out var errorProp))
+            {
+                if (errorProp.ValueKind == JsonValueKind.String)
+                {
+                    return errorProp.GetString();
+                }
+
+                if (errorProp.ValueKind == JsonValueKind.Object &&
+                    errorProp.TryGetProperty("message", out var nestedMessage) &&
+                    nestedMessage.ValueKind == JsonValueKind.String)
+                {
+                    return nestedMessage.GetString();
+                }
+            }
+
+            if (root.TryGetProperty("type", out var typeProp) &&
+                string.Equals(typeProp.GetString(), "error", StringComparison.OrdinalIgnoreCase) &&
+                root.TryGetProperty("payload", out var payload) &&
+                payload.ValueKind == JsonValueKind.Object &&
+                payload.TryGetProperty("message", out var payloadMessage) &&
+                payloadMessage.ValueKind == JsonValueKind.String)
+            {
+                return payloadMessage.GetString();
+            }
+        }
+        catch
+        {
+            // Ignore non-JSON output; callers fall back to recent raw lines.
+        }
+
+        return null;
     }
 
     private static WorkspaceSnapshot CaptureWorkspaceSnapshot(string workspacePath)
@@ -588,5 +977,40 @@ public sealed partial class CodexBrokerService
         public int ExitCode { get; init; }
         public string Summary { get; init; } = string.Empty;
         public List<string> LogLines { get; init; } = new();
+    }
+
+    private static string ExtractJsonObject(string value)
+    {
+        var trimmed = (value ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(trimmed))
+        {
+            throw new InvalidOperationException("The model returned an empty decision.");
+        }
+
+        if (trimmed.StartsWith("```", StringComparison.Ordinal))
+        {
+            var firstNewLine = trimmed.IndexOf('\n');
+            if (firstNewLine >= 0)
+            {
+                trimmed = trimmed[(firstNewLine + 1)..];
+            }
+
+            var closingFence = trimmed.LastIndexOf("```", StringComparison.Ordinal);
+            if (closingFence >= 0)
+            {
+                trimmed = trimmed[..closingFence];
+            }
+
+            trimmed = trimmed.Trim();
+        }
+
+        var firstBrace = trimmed.IndexOf('{');
+        var lastBrace = trimmed.LastIndexOf('}');
+        if (firstBrace >= 0 && lastBrace >= firstBrace)
+        {
+            return trimmed[firstBrace..(lastBrace + 1)];
+        }
+
+        return trimmed;
     }
 }

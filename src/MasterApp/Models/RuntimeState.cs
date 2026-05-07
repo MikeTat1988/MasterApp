@@ -110,6 +110,7 @@ public sealed class CodexChatMessage
 public sealed class CodexChatRun
 {
     public string Id { get; set; } = Guid.NewGuid().ToString("N");
+    public string SharedSessionId { get; set; } = string.Empty;
     public string Status { get; set; } = "idle";
     public string Provider { get; set; } = "codex";
     public string RequestedMode { get; set; } = "auto";
@@ -168,6 +169,9 @@ public sealed class CodexApprovalRequest
     public string Summary { get; set; } = string.Empty;
     public string Command { get; set; } = string.Empty;
     public string WorkingDirectory { get; set; } = string.Empty;
+    public bool IsWorkingDirectoryAllowed { get; set; } = true;
+    public bool CanTrustWorkspace { get; set; }
+    public string TrustWorkspacePath { get; set; } = string.Empty;
     public string Status { get; set; } = "pending";
     public DateTimeOffset RequestedAtUtc { get; set; } = DateTimeOffset.UtcNow;
     public DateTimeOffset? ResolvedAtUtc { get; set; }

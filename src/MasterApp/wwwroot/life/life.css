@@ -1,0 +1,503 @@
+:root {
+  color-scheme: light;
+  --life-ink: #2d2118;
+  --life-muted: #715a44;
+  --life-paper: #f5ecd9;
+  --life-paper-edge: #d8c7a8;
+  --life-accent: #a43a2e;
+  --life-blue: #2f6f91;
+  --life-shadow: 0 16px 34px rgba(42, 24, 11, 0.32);
+  --life-small-shadow: 0 8px 18px rgba(42, 24, 11, 0.24);
+  --life-font: "Aptos", "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  --life-display: "Georgia", "Cambria", serif;
+}
+
+* {
+  box-sizing: border-box;
+  -webkit-tap-highlight-color: transparent;
+}
+
+html,
+body {
+  min-height: 100%;
+}
+
+body.life-body {
+  margin: 0;
+  color: var(--life-ink);
+  font-family: var(--life-font);
+  background:
+    linear-gradient(180deg, rgba(65, 35, 14, 0.08), rgba(44, 23, 9, 0.18)),
+    url("/life/assets/cork_board_bg.png") center top / cover fixed,
+    #9b642f;
+  overscroll-behavior: none;
+}
+
+button,
+input {
+  font: inherit;
+}
+
+button {
+  border: 0;
+}
+
+.life-app {
+  min-height: 100vh;
+}
+
+.life-board {
+  position: relative;
+  min-height: 100vh;
+  padding: max(14px, env(safe-area-inset-top)) 14px calc(118px + env(safe-area-inset-bottom));
+  background:
+    radial-gradient(circle at 15% 10%, rgba(255, 236, 190, 0.18), transparent 28%),
+    radial-gradient(circle at 90% 22%, rgba(58, 31, 12, 0.17), transparent 24%);
+}
+
+.life-board::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(90deg, rgba(67, 38, 18, 0.18), transparent 14%, transparent 86%, rgba(67, 38, 18, 0.18));
+}
+
+.life-shell {
+  position: relative;
+  width: min(100%, 760px);
+  margin: 0 auto;
+}
+
+.life-header {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 0 -4px 12px;
+  padding: 10px 4px 12px;
+  background: linear-gradient(180deg, rgba(136, 86, 37, 0.92), rgba(136, 86, 37, 0.42), transparent);
+  backdrop-filter: blur(4px);
+}
+
+.life-title-block {
+  min-width: 0;
+}
+
+.life-title {
+  margin: 0;
+  font-family: var(--life-display);
+  font-size: clamp(1.9rem, 8vw, 3rem);
+  line-height: 0.98;
+  color: #281a12;
+  text-shadow: 0 1px rgba(255, 233, 190, 0.34);
+  letter-spacing: 0;
+}
+
+.life-date {
+  margin: 3px 0 0;
+  color: #4c3321;
+  font-size: 0.92rem;
+  font-weight: 700;
+}
+
+.life-header-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.life-mini-button,
+.life-chip-button,
+.life-nav-button,
+.life-back-link {
+  min-height: 40px;
+  border-radius: 999px;
+  padding: 0 13px;
+  color: #2d2118;
+  background: rgba(249, 235, 205, 0.82);
+  border: 1px solid rgba(84, 52, 28, 0.25);
+  box-shadow: var(--life-small-shadow);
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 800;
+}
+
+.life-nav-button {
+  width: 42px;
+  padding: 0;
+  font-size: 1.45rem;
+}
+
+.life-nav-button:disabled,
+.life-chip-button:disabled,
+.life-take-button:disabled {
+  opacity: 0.52;
+}
+
+.life-controls {
+  position: relative;
+  z-index: 8;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 9px;
+  margin: 0 0 14px;
+}
+
+.life-chip-button {
+  min-height: 38px;
+  padding-inline: 12px;
+  font-size: 0.86rem;
+}
+
+.life-chip-button.is-blue {
+  background: rgba(215, 233, 238, 0.9);
+}
+
+.life-chip-button.is-red {
+  background: rgba(250, 220, 209, 0.92);
+}
+
+.life-message {
+  position: relative;
+  z-index: 9;
+  margin: 0 0 12px;
+  padding: 10px 13px;
+  border-radius: 14px;
+  background: rgba(255, 242, 211, 0.9);
+  border: 1px solid rgba(88, 58, 27, 0.22);
+  box-shadow: var(--life-small-shadow);
+  color: #382618;
+  font-weight: 700;
+}
+
+.life-board-grid {
+  position: relative;
+  z-index: 5;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px 12px;
+  align-items: start;
+  padding: 8px 0 28px;
+}
+
+.life-note {
+  position: relative;
+  min-height: 150px;
+  padding: 26px 24px 22px;
+  color: #332315;
+  background: url("/life/assets/paper_note_bg.png") center / 100% 100% no-repeat;
+  filter: drop-shadow(0 14px 20px rgba(45, 25, 9, 0.28));
+  transform: rotate(-1.4deg);
+  grid-column: 1 / -1;
+}
+
+.life-note::before {
+  content: "";
+  position: absolute;
+  top: -16px;
+  left: 50%;
+  width: 48px;
+  height: 48px;
+  transform: translateX(-50%);
+  background: url("/life/assets/pin_blue.png") center / contain no-repeat;
+}
+
+.life-note-title {
+  margin: 0 0 8px;
+  font-family: var(--life-display);
+  font-size: 1.3rem;
+  line-height: 1.1;
+}
+
+.life-note-copy {
+  margin: 0;
+  color: #493827;
+  font-size: 0.95rem;
+  line-height: 1.45;
+}
+
+.life-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin-top: 12px;
+}
+
+.life-tag {
+  padding: 5px 8px;
+  border-radius: 999px;
+  background: rgba(95, 61, 31, 0.12);
+  color: #4a3523;
+  font-size: 0.76rem;
+  font-weight: 800;
+}
+
+.life-photo-card {
+  position: relative;
+  aspect-ratio: 360 / 440;
+  padding: 8.5% 10% 16%;
+  background: url("/life/assets/photo_card_frame.png") center / 100% 100% no-repeat;
+  filter: drop-shadow(0 12px 17px rgba(42, 22, 8, 0.28));
+  transform-origin: 50% 18%;
+  border-radius: 8px;
+}
+
+.life-photo-card:nth-child(4n + 1) { transform: rotate(-4deg); }
+.life-photo-card:nth-child(4n + 2) { transform: rotate(2deg); }
+.life-photo-card:nth-child(4n + 3) { transform: rotate(-1deg); }
+.life-photo-card:nth-child(4n) { transform: rotate(3deg); }
+
+.life-photo-card:active {
+  transform: scale(0.98) rotate(var(--tap-rotation, 0deg));
+}
+
+.life-pin,
+.life-staple {
+  position: absolute;
+  z-index: 2;
+  pointer-events: none;
+}
+
+.life-pin {
+  top: -14px;
+  left: 50%;
+  width: 42px;
+  height: 42px;
+  transform: translateX(-50%);
+}
+
+.life-staple {
+  top: 4px;
+  right: 18px;
+  width: 54px;
+  height: 28px;
+  transform: rotate(8deg);
+}
+
+.life-photo-image-wrap {
+  width: 100%;
+  height: 73%;
+  overflow: hidden;
+  background: #e8dccb;
+  border: 1px solid rgba(104, 76, 50, 0.2);
+}
+
+.life-photo-image {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.life-photo-time {
+  display: block;
+  margin-top: 9px;
+  color: #403023;
+  font-family: var(--life-display);
+  font-size: clamp(0.92rem, 3.8vw, 1.1rem);
+  text-align: center;
+}
+
+.life-empty {
+  grid-column: 1 / -1;
+  min-height: 210px;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  text-align: center;
+  color: #3b291b;
+  background: rgba(251, 232, 190, 0.24);
+  border: 2px dashed rgba(77, 45, 20, 0.28);
+  border-radius: 18px;
+  box-shadow: inset 0 0 0 1px rgba(255, 246, 220, 0.18);
+}
+
+.life-empty strong {
+  display: block;
+  margin-bottom: 6px;
+  font-family: var(--life-display);
+  font-size: 1.4rem;
+}
+
+.life-take-wrap {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 30;
+  display: flex;
+  justify-content: center;
+  padding: 14px 18px calc(16px + env(safe-area-inset-bottom));
+  pointer-events: none;
+  background: linear-gradient(180deg, transparent, rgba(83, 49, 22, 0.72));
+}
+
+.life-take-button,
+.life-back-today-button {
+  pointer-events: auto;
+  min-height: 66px;
+  width: min(100%, 390px);
+  border-radius: 24px;
+  padding: 0 26px;
+  color: #fff8eb;
+  background: linear-gradient(180deg, #bd493d, #842c25);
+  border: 1px solid rgba(255, 236, 204, 0.28);
+  box-shadow: 0 18px 34px rgba(52, 24, 13, 0.42), inset 0 1px rgba(255, 255, 255, 0.22);
+  font-size: 1.12rem;
+  font-weight: 900;
+}
+
+.life-back-today-button {
+  background: linear-gradient(180deg, #365f77, #234355);
+}
+
+.life-hidden-input {
+  position: fixed;
+  left: -9999px;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+}
+
+.life-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgba(31, 18, 9, 0.72);
+  backdrop-filter: blur(8px);
+}
+
+.life-modal-card {
+  width: min(100%, 620px);
+  max-height: 88vh;
+  padding: 14px;
+  background: #f8f0e2;
+  box-shadow: var(--life-shadow);
+  border-radius: 10px;
+}
+
+.life-modal-card img {
+  width: 100%;
+  max-height: 70vh;
+  object-fit: contain;
+  display: block;
+  background: #e7d7bf;
+}
+
+.life-modal-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding-top: 10px;
+  color: #3b2b1f;
+  font-weight: 800;
+}
+
+.life-history-list {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 16px;
+  padding-top: 8px;
+}
+
+.life-history-card {
+  position: relative;
+  min-height: 154px;
+  padding: 28px 24px 22px;
+  color: #332315;
+  text-decoration: none;
+  background: url("/life/assets/paper_note_bg.png") center / 100% 100% no-repeat;
+  filter: drop-shadow(0 12px 18px rgba(45, 25, 9, 0.28));
+}
+
+.life-history-card:nth-child(odd) { transform: rotate(-1.5deg); }
+.life-history-card:nth-child(even) { transform: rotate(1.2deg); }
+
+.life-history-card::before {
+  content: "";
+  position: absolute;
+  top: -15px;
+  left: 28px;
+  width: 44px;
+  height: 44px;
+  background: url("/life/assets/pin_red.png") center / contain no-repeat;
+}
+
+.life-history-date {
+  margin: 0 0 8px;
+  font-family: var(--life-display);
+  font-size: 1.25rem;
+}
+
+.life-history-meta {
+  margin: 0 0 8px;
+  color: #604733;
+  font-weight: 800;
+  font-size: 0.86rem;
+}
+
+.life-history-summary {
+  margin: 0;
+  color: #493827;
+  line-height: 1.42;
+}
+
+.life-loading {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  color: #fff4de;
+  font-weight: 900;
+  text-shadow: 0 2px 8px rgba(40, 20, 8, 0.5);
+}
+
+@media (min-width: 560px) {
+  .life-board-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 20px 16px;
+  }
+
+  .life-note {
+    grid-column: span 2;
+  }
+
+  .life-history-list {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (min-width: 860px) {
+  .life-board-grid {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 370px) {
+  .life-board {
+    padding-left: 10px;
+    padding-right: 10px;
+  }
+
+  .life-controls {
+    gap: 7px;
+  }
+
+  .life-chip-button {
+    padding-inline: 10px;
+    font-size: 0.8rem;
+  }
+
+  .life-title {
+    font-size: 1.7rem;
+  }
+}

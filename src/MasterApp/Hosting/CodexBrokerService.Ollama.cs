@@ -54,12 +54,14 @@ public sealed partial class CodexBrokerService
     {
         if (!string.IsNullOrWhiteSpace(runtime.CurrentModel))
         {
-            return runtime.CurrentModel;
+            return IsOllamaProvider(runtime.CurrentProvider)
+                ? runtime.CurrentModel
+                : ResolveSupportedCodexModel(runtime.CurrentModel);
         }
 
         return IsOllamaProvider(runtime.CurrentProvider)
             ? DefaultOllamaModel
-            : (TryReadCurrentCodexModel() ?? string.Empty);
+            : ResolveSupportedCodexModel(TryReadCurrentCodexModel());
     }
 
     private OllamaStatusSnapshot GetOllamaStatus()
@@ -177,6 +179,15 @@ public sealed partial class CodexBrokerService
     {
         var searchContext = await TryBuildWebSearchContextAsync(prompt, cancellationToken);
         var finalPrompt = BuildOllamaPrompt(prompt, conversation, searchContext);
+        return await RequestOllamaTextAsync(model, finalPrompt, cancellationToken);
+    }
+
+    private async Task<string> RequestOllamaTextAsync(
+        string model,
+        string prompt,
+        CancellationToken cancellationToken)
+    {
+        var resolvedModel = string.IsNullOrWhiteSpace(model) ? DefaultOllamaModel : model.Trim();
 
         using var client = new HttpClient
         {
@@ -185,8 +196,8 @@ public sealed partial class CodexBrokerService
 
         var payload = JsonSerializer.Serialize(new
         {
-            model,
-            prompt = finalPrompt,
+            model = resolvedModel,
+            prompt,
             stream = false
         }, JsonOptions.Default);
 

@@ -17,39 +17,42 @@ const masterAppState = {
   codexSelectedMode: "auto",
   codexSelectedWorkspace: "",
   codexSelectedModel: "",
+  codexSelectedProvider: "",
   codexSelectedChatId: "",
+  codexHistoryScope: "all",
   codexRecentsOpen: false,
   codexDetailsOpen: false,
   codexConnectionState: "connecting",
   codexLastError: "",
   codexEventSource: null,
+  codexScrollTop: 0,
+  codexStickToBottom: true,
+  zoomLockBound: false,
   pageMode: document.body?.dataset.page || "dashboard"
 };
 
-const ICON_SPRITE_ID = "masterapp-icon-sprite";
-
-const iconPaths = {
-  bell: "M12 22a2.5 2.5 0 0 0 2.45-2h-4.9A2.5 2.5 0 0 0 12 22Zm7-6V11a7 7 0 1 0-14 0v5L3 18v1h18v-1l-2-2Z",
-  settings: "M12 8.2a3.8 3.8 0 1 0 0 7.6 3.8 3.8 0 0 0 0-7.6Zm8.2 4.3-.02-.5 1.63-1.27-1.8-3.12-2 .6a7.9 7.9 0 0 0-1.66-.96l-.3-2.05h-3.6l-.3 2.05c-.58.2-1.14.5-1.66.96l-2-.6-1.8 3.12 1.63 1.27-.02.5.02.5-1.63 1.27 1.8 3.12 2-.6c.52.44 1.08.76 1.66.96l.3 2.05h3.6l.3-2.05c.58-.2 1.14-.52 1.66-.96l2 .6 1.8-3.12-1.63-1.27.02-.5Z",
-  search: "m20.5 20.5-4.6-4.6m1.6-5.2a6.8 6.8 0 1 1-13.6 0 6.8 6.8 0 0 1 13.6 0Z",
-  filter: "M4 6h16M7 12h10m-7 6h4",
-  refresh: "M20 11a8 8 0 0 0-14.4-4.6M4 13a8 8 0 0 0 14.4 4.6M5 4v4h4m6 8h4v4",
-  inbox: "M4 6.5h16v11H4zM4 14h5l2 2h2l2-2h5",
-  tunnel: "M3.5 12 20.5 4.5l-5 15-4.2-5.3-3.7-2.2Z",
-  logs: "M6 4h9l3 3v13H6zM9 11h6M9 15h6M9 7h3",
-  home: "M4.5 11.5 12 5l7.5 6.5V20h-5.5v-5h-4v5H4.5z",
-  library: "M5 6.5A2.5 2.5 0 0 1 7.5 4H20v14.5A1.5 1.5 0 0 0 18.5 17H7.5A2.5 2.5 0 0 0 5 19.5v-13Zm0 13A1.5 1.5 0 0 1 6.5 18H18",
-  store: "M5 8h14l-1.1 10.2A2 2 0 0 1 15.9 20H8.1a2 2 0 0 1-1.99-1.8L5 8Zm3-3h8l1 3H7l1-3Zm1.5 7h5",
-  play: "M9 7.5v9l7-4.5-7-4.5Z",
-  external: "M14 5h5v5M10 14 19 5M18 12v6H6V6h6",
-  more: "M12 7.5a1.2 1.2 0 1 0 0-2.4 1.2 1.2 0 0 0 0 2.4Zm0 6a1.2 1.2 0 1 0 0-2.4 1.2 1.2 0 0 0 0 2.4Zm0 6a1.2 1.2 0 1 0 0-2.4 1.2 1.2 0 0 0 0 2.4Z",
-  plus: "M12 5v14M5 12h14",
-  close: "M6 6l12 12M18 6 6 18",
-  globe: "M12 3.5a8.5 8.5 0 1 0 0 17 8.5 8.5 0 0 0 0-17Zm0 0c2.6 2.3 4 5.2 4 8.5s-1.4 6.2-4 8.5m0-17c-2.6 2.3-4 5.2-4 8.5s1.4 6.2 4 8.5M4.3 9.5h15.4M4.3 14.5h15.4",
-  export: "M12 4v10m0 0 4-4m-4 4-4-4M5 15.5v1A2.5 2.5 0 0 0 7.5 19h9a2.5 2.5 0 0 0 2.5-2.5v-1",
-  trash: "M5 7.5h14M9.5 4.5h5M8 7.5l.8 11h6.4l.8-11M10 10.5v5M14 10.5v5",
-  chat: "M7 18.5 4.5 20v-3.8A7.5 7.5 0 1 1 19.5 9 7.4 7.4 0 0 1 12 16.5H9"
-};
+const iconNames = new Set([
+  "bell",
+  "settings",
+  "search",
+  "filter",
+  "refresh",
+  "inbox",
+  "tunnel",
+  "logs",
+  "home",
+  "library",
+  "store",
+  "play",
+  "external",
+  "more",
+  "plus",
+  "close",
+  "globe",
+  "export",
+  "trash",
+  "chat"
+]);
 
 const fallbackLogos = [
   { glyph: "store", start: "#8fc3ff", end: "#4f6dff", color: "#f4f7ff" },
@@ -72,7 +75,7 @@ function initMasterApp() {
     return;
   }
 
-  ensureIconSprite();
+  initZoomLock();
 
   if (masterAppState.pageMode === "store") {
     masterAppState.currentTab = "store";
@@ -104,7 +107,7 @@ function renderAppShell(options = {}) {
 
   appRoot.innerHTML = `
     <div class="app-frame">
-      <div class="app-content">
+      <div class="app-content ${masterAppState.currentTab === "codex" ? "app-content--codex" : ""}">
         ${Header()}
         ${SettingsSheet()}
         ${renderDashboardPage()}
@@ -150,6 +153,8 @@ function renderCodexUi() {
   const appRoot = document.getElementById("app");
   const scrollContainer = appRoot?.querySelector(".app-content");
   const contentScrollTop = scrollContainer instanceof HTMLElement ? scrollContainer.scrollTop : 0;
+  const previousChatScroll = appRoot?.querySelector(".codex-chat-scroll");
+  const scrollState = captureCodexScrollState(previousChatScroll);
   const activeElement = document.activeElement;
   const activeId = activeElement instanceof HTMLElement ? activeElement.id : "";
   const selectionStart = activeElement && "selectionStart" in activeElement ? activeElement.selectionStart : null;
@@ -176,6 +181,8 @@ function renderCodexUi() {
     if (nextScrollContainer instanceof HTMLElement) {
       nextScrollContainer.scrollTop = contentScrollTop;
     }
+
+    restoreCodexScrollState(scrollState);
 
     if (activeId) {
       const nextActive = document.getElementById(activeId);
@@ -286,9 +293,14 @@ function bindCodexInteractions() {
 
   const codexModel = document.getElementById("codex-model");
   if (codexModel) {
-    codexModel.value = masterAppState.codexSelectedModel;
+    codexModel.value = encodeCodexModelValue(
+      masterAppState.codexSelectedProvider || masterAppState.latestCodex?.currentProvider || "codex",
+      masterAppState.codexSelectedModel || masterAppState.latestCodex?.currentModel || ""
+    );
     codexModel.addEventListener("change", async event => {
-      masterAppState.codexSelectedModel = event.target.value;
+      const parsed = parseCodexModelValue(event.target.value);
+      masterAppState.codexSelectedProvider = parsed.provider;
+      masterAppState.codexSelectedModel = parsed.slug;
       renderCodexUi();
       await updateCodexModel(event.target.value);
     });
@@ -316,6 +328,13 @@ function bindCodexInteractions() {
     });
   });
 
+  document.querySelectorAll("[data-codex-history-scope]").forEach(button => {
+    button.addEventListener("click", () => {
+      masterAppState.codexHistoryScope = button.dataset.codexHistoryScope || "all";
+      renderCodexUi();
+    });
+  });
+
   document.querySelectorAll("[data-codex-toggle-details]").forEach(button => {
     button.addEventListener("click", () => {
       masterAppState.codexDetailsOpen = !masterAppState.codexDetailsOpen;
@@ -340,6 +359,8 @@ function bindCodexInteractions() {
       await startNewCodexSession();
     });
   });
+
+  bindCodexScrollTracking();
 }
 
 function setTab(tab) {
@@ -356,6 +377,10 @@ function setLogFocus() {
 }
 
 function Header() {
+  if (masterAppState.currentTab === "store") {
+    return "";
+  }
+
   return `
     <header class="top-header top-header--minimal">
       <h1 class="brand-wordmark">MasterApp</h1>
@@ -368,6 +393,7 @@ function Header() {
 
 function SettingsSheet() {
   const status = masterAppState.latestStatus;
+  const codexUsage = masterAppState.latestCodex?.usage || null;
 
   return `
     <section class="settings-sheet ${masterAppState.settingsOpen ? "is-open" : ""}" aria-hidden="${masterAppState.settingsOpen ? "false" : "true"}">
@@ -400,6 +426,15 @@ function SettingsSheet() {
         </details>
 
         <details class="settings-group">
+          <summary>Codex usage</summary>
+          <div class="settings-group-body">
+            <div class="details-grid codex-usage-grid">
+              ${renderDetailRows(getCodexUsageRows(codexUsage))}
+            </div>
+          </div>
+        </details>
+
+        <details class="settings-group">
           <summary>Logs</summary>
           <div class="settings-group-body">
             <div class="log-actions">
@@ -408,6 +443,15 @@ function SettingsSheet() {
               `).join("")}
             </div>
             <pre class="log-viewer">${escapeHtml(masterAppState.latestLogText)}</pre>
+          </div>
+        </details>
+
+        <details class="settings-group">
+          <summary>Package installs</summary>
+          <div class="settings-group-body">
+            <div class="details-grid">
+              ${renderPackageResultRows(status?.lastPackageResult)}
+            </div>
           </div>
         </details>
       </div>
@@ -426,10 +470,10 @@ function BottomNav() {
   return `
     <nav class="bottom-nav" aria-label="Bottom navigation">
       ${items.map(item => `
-        <button class="tab-button ${masterAppState.currentTab === item.id ? "is-active" : ""}" type="button" data-tab="${item.id}">
+        ${item.href ? `<a class="tab-button" href="${item.href}">` : `<button class="tab-button ${masterAppState.currentTab === item.id ? "is-active" : ""}" type="button" data-tab="${item.id}">`}
           <span class="tab-button-icon" aria-hidden="true">${icon(item.icon)}</span>
           <span class="tab-label">${escapeHtml(item.label)}</span>
-        </button>
+        ${item.href ? `</a>` : `</button>`}
       `).join("")}
     </nav>
   `;
@@ -518,21 +562,16 @@ function renderStorePage() {
 
   return `
     <section class="page ${masterAppState.currentTab === "store" ? "is-active" : ""}" id="page-store">
-      <div class="page-head">
-        <div>
-          <h2 class="page-title">Store</h2>
-          <p class="page-subtitle">A cleaner storefront with one tap to launch each app.</p>
+      <div class="store-topbar">
+        <div class="store-chip-row store-chip-row--top">
+          ${StoreFilterChip("All", "all", getStoreVisibleApps().length, masterAppState.storeFilter === "all")}
+          ${StoreFilterChip("Recent", "recent", getRecentStoreApps().length, masterAppState.storeFilter === "recent")}
         </div>
+        <button class="icon-button store-settings-button" type="button" aria-label="Settings" data-toggle-settings>${iconWrap(icon("settings"))}</button>
       </div>
 
-      <div class="store-chip-row">
-        ${StoreFilterChip("All", "all", getStoreVisibleApps().length, masterAppState.storeFilter === "all")}
-        ${StoreFilterChip("Recent", "recent", getRecentStoreApps().length, masterAppState.storeFilter === "recent")}
-      </div>
+      ${StoreInstallStatusLine(masterAppState.latestStatus?.lastPackageResult)}
 
-      <div class="section-head">
-        <h3 class="section-title">Browse apps</h3>
-      </div>
       <div class="store-grid">
         ${apps.length ? apps.map(renderStoreCard).join("") : `<div class="empty-state">No store apps match this filter yet.</div>`}
       </div>
@@ -542,7 +581,7 @@ function renderStorePage() {
 
 function renderCodexPage() {
   const codex = masterAppState.latestCodex;
-  const recent = (codex?.recentChats || []).filter(item => item && item.updatedAtUtc);
+  const allRecent = (codex?.recentChats || []).filter(item => item && item.updatedAtUtc);
   const active = codex?.activeRun || null;
   const pendingApproval = codex?.pendingApproval || null;
   const currentSessionId = codex?.currentSessionId || "";
@@ -552,27 +591,43 @@ function renderCodexPage() {
   const visibleModelChoices = modelChoices.length ? modelChoices : [{ slug: "", displayName: "Default" }];
   const visibleWorkspaces = workspaces.length ? workspaces : [{ path: "", label: "General" }];
   const selectedWorkspace = masterAppState.codexSelectedWorkspace || workspaces[0]?.path || "";
+  const selectedProvider = masterAppState.codexSelectedProvider || codex?.currentProvider || "codex";
   const selectedModel = masterAppState.codexSelectedModel || codex?.currentModel || modelChoices[0]?.slug || "";
+  const selectedModelKey = encodeCodexModelValue(selectedProvider, selectedModel);
+  const scopedRecent = getScopedCodexRecentChats(allRecent, selectedWorkspace);
+  const recent = masterAppState.codexHistoryScope === "all" ? allRecent : scopedRecent;
   const selectedRecent = recent.find(item => item.id === masterAppState.codexSelectedChatId)
-    || recent.find(item => item.id === currentSessionId)
-    || recent[0]
+    || allRecent.find(item => item.id === masterAppState.codexSelectedChatId)
+    || (currentSessionId ? allRecent.find(item => item.id === currentSessionId) : null)
     || null;
   const isViewingCurrentSession = !!selectedRecent && selectedRecent.id === currentSessionId;
+  const isViewingEmptyCurrentSession = !selectedRecent && !currentSessionId && !masterAppState.codexSelectedChatId;
   const isBusy = !!active && !isCodexRunTerminal(active.status);
+  const status = getCodexPrimaryStatus(codex, active, pendingApproval, codex?.cliResolutionStatus, codex?.cliProbe);
 
   return `
     <section class="page ${masterAppState.currentTab === "codex" ? "is-active" : ""}" id="page-codex">
-      <section class="codex-phone-shell">
+      <section class="codex-phone-shell ${masterAppState.codexDetailsOpen ? "is-details-open" : ""}">
         <article class="codex-chat-surface">
           <div class="codex-chat-topbar">
-            ${renderCodexRecentsPanel(recent, selectedRecent)}
+            <button class="icon-button codex-settings-button" type="button" aria-label="Open Codex settings" data-toggle-settings>${iconWrap(icon("settings"))}</button>
+            <div class="codex-top-status">
+              <span class="status-dot ${status.tone === "success" ? "is-success" : status.tone === "danger" ? "is-danger" : status.tone === "warning" ? "is-warning" : ""}"></span>
+              <span>${escapeHtml(status.label)}</span>
+            </div>
+            <div class="codex-top-actions">
+              <button class="secondary-button codex-details-button" type="button" data-codex-toggle-details>${escapeHtml(masterAppState.codexDetailsOpen ? "Hide activity" : "Activity")}</button>
+              ${renderCodexRecentsPanel(allRecent, recent, selectedRecent, selectedWorkspace)}
+            </div>
           </div>
           <div class="codex-chat-scroll">
             <div class="codex-transcript">
-              ${renderCodexConversation(selectedRecent, active, pendingApproval, isViewingCurrentSession)}
+              ${renderCodexConversation(selectedRecent, active, pendingApproval, isViewingCurrentSession || isViewingEmptyCurrentSession)}
             </div>
           </div>
         </article>
+
+        ${masterAppState.codexDetailsOpen ? renderCodexActivityPanel(codex, active, pendingApproval, selectedRecent, selectedWorkspace) : ""}
 
         <form id="codex-form" class="codex-composer-card codex-form codex-form--chat-first">
           <div class="codex-composer-top">
@@ -590,7 +645,7 @@ function renderCodexPage() {
               <span class="codex-compact-label">Model</span>
               <select id="codex-model" class="codex-select codex-select--compact">
                 ${visibleModelChoices.map(item => `
-                  <option value="${escapeAttribute(item.slug)}" ${selectedModel === item.slug ? "selected" : ""}>${escapeHtml(item.displayName || item.slug)}</option>
+                  <option value="${escapeAttribute(encodeCodexModelValue(item.provider || "codex", item.slug))}" ${selectedModelKey === encodeCodexModelValue(item.provider || "codex", item.slug) ? "selected" : ""}>${escapeHtml(item.displayName || item.slug)}</option>
                 `).join("")}
               </select>
             </label>
@@ -632,15 +687,7 @@ function getCodexPrimaryStatus(codex, active, pendingApproval, resolutionState, 
     return { tone: "warning", label: "Needs approval", message: pendingApproval.summary || "Codex is waiting for your approval." };
   }
 
-  if (active?.status === "failed") {
-    return { tone: "danger", label: "Failed", message: active.failureMessage || "The last run failed." };
-  }
-
-  if (active?.status === "stopped") {
-    return { tone: "neutral", label: "Stopped", message: active.failureMessage || "Session stopped." };
-  }
-
-  if (active && !["completed", "restart-scheduled"].includes(active.status || "")) {
+  if (active && !isCodexRunTerminal(active.status)) {
     return { tone: "warning", label: "Working", message: "Codex is working on the current request." };
   }
 
@@ -651,16 +698,22 @@ function getCodexPrimaryStatus(codex, active, pendingApproval, resolutionState, 
   };
 }
 
-function renderCodexRecentsPanel(recent, selectedRecent) {
+function renderCodexRecentsPanel(allRecent, recent, selectedRecent, selectedWorkspace) {
+  const scopedCount = getScopedCodexRecentChats(allRecent, selectedWorkspace).length;
+  const allCount = allRecent.length;
   return `
     <details class="codex-recents-panel" data-codex-toggle-recents ${masterAppState.codexRecentsOpen ? "open" : ""}>
       <summary class="codex-recents-summary">Chat history</summary>
       <div class="codex-recents-body">
-        <div class="codex-recents-note">${recent.length ? `${recent.length} recent chats` : "No chats yet"}</div>
+        <div class="codex-history-scope-row">
+          <button class="codex-scope-button ${masterAppState.codexHistoryScope !== "all" ? "is-active" : ""}" type="button" data-codex-history-scope="context">This context ${scopedCount ? `(${scopedCount})` : ""}</button>
+          <button class="codex-scope-button ${masterAppState.codexHistoryScope === "all" ? "is-active" : ""}" type="button" data-codex-history-scope="all">All ${allCount ? `(${allCount})` : ""}</button>
+        </div>
+        <div class="codex-recents-note">${recent.length ? `${recent.length} visible chats` : "No chats for this context yet"}</div>
         ${recent.length ? recent.map(item => `
           <button class="codex-recent-item ${selectedRecent?.id === item.id ? "is-active" : ""}" type="button" data-codex-chat-id="${escapeAttribute(item.id)}">
             <span class="codex-recent-title">${escapeHtml(item.title || "Untitled chat")}</span>
-            <span class="codex-recent-meta">${escapeHtml(timeAgo(item.updatedAtUtc))}</span>
+            <span class="codex-recent-meta">${escapeHtml(formatCodexRecentMeta(item))}</span>
           </button>
         `).join("") : `<div class="empty-state codex-empty-state">Recent chats will show up here.</div>`}
       </div>
@@ -670,6 +723,7 @@ function renderCodexRecentsPanel(recent, selectedRecent) {
 
 function HeroStatusCard(status) {
   const tunnel = status?.tunnel;
+  const packageResult = status?.lastPackageResult;
   const isRunning = !!tunnel?.isRunning;
   const isStopped = tunnel?.status === "Stopped";
   const chip = isRunning
@@ -686,6 +740,17 @@ function HeroStatusCard(status) {
         <button class="primary-button" type="button" onclick="postAction('${isRunning ? "/api/tunnel/restart" : "/api/tunnel/start"}')">${isRunning ? "Reconnect" : "Start tunnel"}</button>
         <button class="secondary-button" type="button" ${isRunning ? "" : "disabled"} onclick="postAction('/api/tunnel/stop')">Stop</button>
       </div>
+      ${packageResult ? `
+        <div class="hero-install-status">
+          <div class="hero-top hero-top--compact">
+            <div class="hero-kicker hero-kicker--tight">${statusDot(packageResult.success ? "success" : "danger")} Packages</div>
+            ${StatusChip(packageResult.success ? "Installed" : "Failed", packageResult.success ? "success" : "danger")}
+          </div>
+          <div class="details-grid">
+            ${renderPackageResultRows(packageResult)}
+          </div>
+        </div>
+      ` : ""}
     </article>
   `;
 }
@@ -770,12 +835,35 @@ function StoreFilterChip(label, value, count, active) {
   `;
 }
 
+function StoreInstallStatusLine(packageResult) {
+  if (!packageResult) {
+    return `
+      <div class="store-install-line">
+        ${statusDot("warning")}
+        <span>No install activity yet.</span>
+      </div>
+    `;
+  }
+
+  const tone = packageResult.success ? "success" : "danger";
+  const state = packageResult.success ? "OK install" : "Install failed";
+  const source = packageResult.sourceFileName || packageResult.appId || "package";
+  const time = packageResult.timestampUtc ? formatDateTime(packageResult.timestampUtc) : "recently";
+
+  return `
+    <div class="store-install-line store-install-line--${tone}">
+      ${statusDot(tone)}
+      <span>${escapeHtml(state)} - ${escapeHtml(source)} - ${escapeHtml(time)}</span>
+    </div>
+  `;
+}
+
 function FeaturedStoreCard(app) {
   return `
     <article class="featured-store-card">
       <div class="featured-top">
         <span class="featured-label">Featured</span>
-        ${StatusChip(app.runState?.isRunning ? "Open" : "Ready", app.runState?.isRunning ? "success" : "warning")}
+        ${app.runState?.isRunning ? StatusChip("Open", "success") : ""}
       </div>
       <div style="margin-top: 16px; display: flex; gap: 14px; align-items: center;">
         ${appAvatar(app)}
@@ -807,6 +895,7 @@ function ActivityItem(item) {
 }
 
 function renderStoreCard(app) {
+  const lastUsage = getAppLastUsageUtc(app);
   return `
     <a class="store-card store-card--centered" href="${escapeAttribute(app.launchUrl)}" target="_blank" rel="noreferrer">
       <div class="store-card-main">
@@ -815,9 +904,7 @@ function renderStoreCard(app) {
           <h3 class="store-name">${escapeHtml(app.displayName)}</h3>
           <div class="store-version">${escapeHtml(getInstallVersionLabel(app))}</div>
         </div>
-      </div>
-      <div class="store-footer store-footer--centered">
-        <div class="status-chip-row status-chip-row--centered">${StatusChip(app.runState?.isRunning ? "Live" : "Ready", app.runState?.isRunning ? "success" : "warning")}</div>
+        <div class="store-card-meta">${escapeHtml(lastUsage ? `Last used ${timeAgo(lastUsage)}` : `Installed ${formatShortDate(app.installedAtUtc)}`)}</div>
       </div>
     </a>
   `;
@@ -852,7 +939,7 @@ function getVisibleLibraryApps() {
 }
 
 function getStoreVisibleApps() {
-  return masterAppState.latestApps.filter(app => app.storeVisible);
+  return sortStoreApps(masterAppState.latestApps.filter(app => app.storeVisible));
 }
 
 function getFilteredStoreApps() {
@@ -864,15 +951,39 @@ function getFilteredStoreApps() {
 }
 
 function getRecentStoreApps() {
-  return [...getStoreVisibleApps()]
-    .sort((left, right) => new Date(right.installedAtUtc || 0) - new Date(left.installedAtUtc || 0))
-    .slice(0, 4);
+  return getStoreVisibleApps().slice(0, 4);
 }
 
 function getFeaturedApp() {
   return [...getStoreVisibleApps()]
     .sort((left, right) => Number(!!right.runState?.isRunning) - Number(!!left.runState?.isRunning)
       || new Date(right.installedAtUtc || 0) - new Date(left.installedAtUtc || 0))[0] || null;
+}
+
+function sortStoreApps(apps) {
+  return [...apps].sort((left, right) =>
+    getTimeValue(right.installedAtUtc) - getTimeValue(left.installedAtUtc)
+    || getTimeValue(getAppLastUsageUtc(right)) - getTimeValue(getAppLastUsageUtc(left))
+    || String(left.displayName || left.id || "").localeCompare(String(right.displayName || right.id || ""))
+  );
+}
+
+function getAppLastUsageUtc(app) {
+  const candidates = [
+    app.lastUsedAtUtc,
+    app.lastUsageAtUtc,
+    app.runState?.startedAtUtc,
+    app.runState?.stoppedAtUtc
+  ];
+
+  return candidates
+    .filter(Boolean)
+    .sort((left, right) => getTimeValue(right) - getTimeValue(left))[0] || "";
+}
+
+function getTimeValue(value) {
+  const timestamp = new Date(value || 0).getTime();
+  return Number.isFinite(timestamp) ? timestamp : 0;
 }
 
 function getRunningApps(apps) {
@@ -945,6 +1056,23 @@ function renderDetailRows(rows) {
   `).join("");
 }
 
+function renderPackageResultRows(result) {
+  if (!result) {
+    return `<div class="detail-row"><span class="field-label">Result</span><span class="value">No package activity yet.</span></div>`;
+  }
+
+  const target = [result.appId, result.version].filter(Boolean).join(" ");
+  const rows = [
+    { label: "Source zip", value: result.sourceFileName || "-" },
+    { label: "Outcome", value: result.success ? "Installed" : "Failed" },
+    { label: "Target", value: target || "No app activated" },
+    { label: "Time", value: result.timestampUtc ? timeAgo(result.timestampUtc) : "-" },
+    { label: "Message", value: result.message || "-" }
+  ];
+
+  return renderDetailRows(rows);
+}
+
 function renderIssueRows(issues) {
   if (!issues.length) {
     return `<div class="detail-row"><span class="field-label">Result</span><span class="value">All required values look configured.</span></div>`;
@@ -986,6 +1114,13 @@ function renderCodexConversation(selectedRecent, active, pendingApproval, isView
       parts.push(renderCodexApprovalCard(pendingApproval));
     }
     parts.push(renderCodexProcessing(active, pendingApproval));
+    const activeFinalAlreadyVisible = messages.some(message =>
+      message?.runId && active?.id &&
+      message.runId === active.id &&
+      (message.role || "").toLowerCase() === "assistant");
+    if (!activeFinalAlreadyVisible) {
+      parts.push(renderCodexFinalResponse(active));
+    }
   }
 
   return parts.join("");
@@ -997,7 +1132,7 @@ function renderCodexWelcomeCard() {
       <div class="codex-message-meta">
         <span>Start here</span>
       </div>
-      <div class="codex-message-assistant">Type a request below and your reply will appear here.</div>
+      <div class="codex-message-assistant">Type a request below and your reply will appear here. Chat history stays available from the button above.</div>
     </article>
   `;
 }
@@ -1041,6 +1176,7 @@ function renderCodexProcessing(active, pendingApproval) {
     return "";
   }
 
+  const latest = getCodexLatestActivity(active);
   return `
     <article class="codex-message-card codex-message-card--assistant codex-message-card--processing">
       <div class="codex-message-meta">
@@ -1048,9 +1184,58 @@ function renderCodexProcessing(active, pendingApproval) {
       </div>
       <div class="codex-processing">
         <span class="codex-spinner" aria-hidden="true"></span>
-        <span>Processing...</span>
+        <span>${escapeHtml(latest || "Processing...")}</span>
       </div>
     </article>
+  `;
+}
+
+function renderCodexActivityPanel(codex, active, pendingApproval, selectedRecent, selectedWorkspace) {
+  const activity = getCodexActivityItems(active, pendingApproval);
+  const changedFiles = active?.changedFiles || [];
+  return `
+    <aside class="codex-activity-panel" aria-label="Codex activity">
+      <div class="codex-activity-head">
+        <div>
+          <div class="codex-message-meta"><span>On demand</span></div>
+          <h3 class="section-title">Activity</h3>
+        </div>
+        <button class="icon-button" type="button" aria-label="Close activity" data-codex-toggle-details>${iconWrap(icon("close"))}</button>
+      </div>
+      <div class="codex-activity-section">
+        <div class="codex-activity-label">Current context</div>
+        <div class="codex-activity-value">${escapeHtml(trimPath(selectedWorkspace || selectedRecent?.cwd || "General"))}</div>
+      </div>
+      ${renderCodexSummaryChips(active)}
+      <div class="codex-activity-section">
+        <div class="codex-activity-label">Timeline</div>
+        ${activity.length ? activity.map(renderCodexActivityItem).join("") : `<div class="empty-state codex-empty-state">Activity will appear while Codex works.</div>`}
+      </div>
+      <details class="codex-activity-section">
+        <summary class="codex-activity-summary">Changed files</summary>
+        ${renderCodexList(changedFiles, "No changed files reported yet.")}
+      </details>
+      <details class="codex-activity-section">
+        <summary class="codex-activity-summary">Build and restart</summary>
+        ${renderBuildAndRestart(active, codex?.lastRelaunch)}
+      </details>
+      <details class="codex-activity-section">
+        <summary class="codex-activity-summary">Raw live log</summary>
+        ${active?.logLines?.length ? `<pre class="codex-command-preview codex-log-preview">${escapeHtml(active.logLines.join("\n"))}</pre>` : `<div class="empty-state codex-empty-state">No live log lines yet.</div>`}
+      </details>
+    </aside>
+  `;
+}
+
+function renderCodexActivityItem(item) {
+  return `
+    <div class="codex-activity-item">
+      <span class="codex-activity-dot"></span>
+      <div>
+        <div class="codex-activity-title">${escapeHtml(item.title)}</div>
+        ${item.detail ? `<div class="codex-activity-detail">${escapeHtml(item.detail)}</div>` : ""}
+      </div>
+    </div>
   `;
 }
 
@@ -1059,16 +1244,28 @@ function renderCodexApprovalCard(approval) {
     return "";
   }
 
+  const canTrustWorkspace = !!approval.canTrustWorkspace && !!approval.trustWorkspacePath;
+  const approvalButtons = canTrustWorkspace
+    ? `
+        <button class="primary-button" type="button" data-codex-approval="approve-once">Continue once</button>
+        <button class="secondary-button" type="button" data-codex-approval="trust">Trust workspace</button>
+        <button class="secondary-button" type="button" data-codex-approval="reject">Not now</button>
+      `
+    : `
+        <button class="primary-button" type="button" data-codex-approval="approve">Continue</button>
+        <button class="secondary-button" type="button" data-codex-approval="reject">Not now</button>
+      `;
+
   return `
     <article class="codex-message-card codex-message-card--approval">
       <div class="codex-message-meta">
         <span>Needs your permission</span>
       </div>
       <div class="codex-approval-copy">${escapeHtml(approval.summary || "Codex wants to continue with the next step.")}</div>
+      ${canTrustWorkspace ? `<div class="codex-approval-copy">Working directory is outside trusted workspaces: ${escapeHtml(approval.trustWorkspacePath)}</div>` : ""}
       ${approval.command ? `<pre class="codex-command-preview">${escapeHtml(approval.command || "")}</pre>` : ""}
       <div class="codex-form-actions">
-        <button class="primary-button" type="button" data-codex-approval="approve">Continue</button>
-        <button class="secondary-button" type="button" data-codex-approval="reject">Not now</button>
+        ${approvalButtons}
       </div>
     </article>
   `;
@@ -1243,6 +1440,136 @@ function renderBuildAndRestart(active, lastRelaunch) {
   return `<div class="details-grid">${renderDetailRows(rows)}</div>`;
 }
 
+function getScopedCodexRecentChats(chats, selectedWorkspace) {
+  if (masterAppState.codexHistoryScope === "all") {
+    return chats;
+  }
+
+  const selected = normalizePathForCompare(selectedWorkspace);
+  if (!selected) {
+    return chats.filter(item => !item.cwd);
+  }
+
+  return chats.filter(item => normalizePathForCompare(item.cwd) === selected);
+}
+
+function getSharedCodexSessionIdForSubmit() {
+  const chats = masterAppState.latestCodex?.recentChats || [];
+  const selectedId = masterAppState.codexSelectedChatId || masterAppState.latestCodex?.currentSessionId || "";
+  if (!selectedId) {
+    return "";
+  }
+
+  const selected = chats.find(item => item.id === selectedId);
+  if (!selected) {
+    return "";
+  }
+
+  return isSharedCodexChat(selected) ? selected.id : "";
+}
+
+function isSharedCodexChat(chat) {
+  return !!chat && (
+    (chat.source || "").toLowerCase() === "codex" ||
+    !!chat.sessionPath
+  );
+}
+
+function normalizePathForCompare(path) {
+  return String(path || "").trim().replace(/\//g, "\\").replace(/\\+$/g, "").toLowerCase();
+}
+
+function formatCodexRecentMeta(item) {
+  const parts = [];
+  if (item?.source) {
+    parts.push(item.source);
+  }
+  if (item?.cwd) {
+    parts.push(trimPath(item.cwd));
+  }
+  parts.push(timeAgo(item?.updatedAtUtc));
+  return parts.filter(Boolean).join(" / ");
+}
+
+function getCodexLatestActivity(active) {
+  const items = getCodexActivityItems(active, null);
+  return items[0]?.detail || items[0]?.title || "";
+}
+
+function getCodexActivityItems(active, pendingApproval) {
+  const items = [];
+  if (pendingApproval) {
+    items.push({
+      title: "Waiting for approval",
+      detail: pendingApproval.summary || pendingApproval.command || "Codex needs your permission to continue."
+    });
+  }
+
+  if (active?.approvalHistory?.length) {
+    active.approvalHistory.slice(-6).reverse().forEach(record => {
+      items.push({
+        title: formatCodexApprovalTitle(record),
+        detail: record.outputSummary || record.summary || record.command || ""
+      });
+    });
+  }
+
+  if (active?.logLines?.length) {
+    active.logLines.slice(-10).reverse().forEach(line => {
+      items.push(formatCodexLogActivity(line));
+    });
+  }
+
+  if (active?.status && !items.length) {
+    items.push({
+      title: formatCodexRunStatus(active.status),
+      detail: active.summary || active.failureMessage || active.taskModeReason || ""
+    });
+  }
+
+  return items.slice(0, 14);
+}
+
+function formatCodexApprovalTitle(record) {
+  const kind = record?.kind ? record.kind.charAt(0).toUpperCase() + record.kind.slice(1) : "Action";
+  const decision = record?.decision ? ` / ${record.decision}` : "";
+  return `${kind}${decision}`;
+}
+
+function formatCodexLogActivity(line) {
+  const text = String(line || "");
+  const match = text.match(/^\[[^\]]+\]\s+\[([^\]]+)\]\s+(.*)$/);
+  if (!match) {
+    return { title: "Log", detail: text };
+  }
+
+  return {
+    title: match[1].charAt(0).toUpperCase() + match[1].slice(1),
+    detail: match[2]
+  };
+}
+
+function formatCodexRunStatus(status) {
+  switch ((status || "").toLowerCase()) {
+    case "queued":
+      return "Queued";
+    case "processing":
+      return "Thinking through next step";
+    case "running-command":
+      return "Running command";
+    case "waiting-approval":
+      return "Waiting for approval";
+    case "completed":
+      return "Completed";
+    case "failed":
+      return "Failed";
+    case "stopped":
+      return "Stopped";
+    default:
+      return status || "Idle";
+  }
+}
+
 function getCodexConnectionLabel() {
   if (masterAppState.codexConnectionState === "open") {
     return "Live";
@@ -1310,7 +1637,7 @@ function getStoreSubtitle(app) {
   if (app.appType === "static") {
     return "Launch instantly through MasterApp.";
   }
-  return app.runState?.isRunning ? "Open the live app." : "Ready to launch when you are.";
+  return app.runState?.isRunning ? "Open the live app." : "Launch through MasterApp.";
 }
 
 function getDefaultCodexModes() {
@@ -1438,12 +1765,16 @@ async function submitCodexPrompt() {
     return;
   }
 
+  const sessionId = getSharedCodexSessionIdForSubmit();
   const workspacePath = masterAppState.codexSelectedWorkspace || masterAppState.latestCodex?.configuredWorkspaces?.[0]?.path || "";
   const model = masterAppState.codexSelectedModel || masterAppState.latestCodex?.currentModel || "";
+  const provider = masterAppState.codexSelectedProvider || masterAppState.latestCodex?.currentProvider || "codex";
   const mode = masterAppState.codexSelectedMode || "auto";
   const optimisticRun = {
     id: `pending-${Date.now()}`,
+    sharedSessionId: sessionId,
     prompt,
+    provider,
     requestedMode: mode,
     taskMode: mode === "auto" ? "" : mode,
     taskModeSource: mode === "auto" ? "auto" : "manual",
@@ -1462,7 +1793,7 @@ async function submitCodexPrompt() {
 
   try {
     masterAppState.codexLastError = "";
-    masterAppState.codexSelectedChatId = "";
+    masterAppState.codexStickToBottom = true;
     setLatestCodex({
       ...(masterAppState.latestCodex || {}),
       activeRun: optimisticRun,
@@ -1472,7 +1803,9 @@ async function submitCodexPrompt() {
 
     const result = await postJson("/api/codex/messages", {
       prompt,
+      sessionId,
       workspacePath,
+      provider,
       model,
       mode
     });
@@ -1501,13 +1834,16 @@ async function submitCodexPrompt() {
 }
 
 async function updateCodexModel(model) {
-  if (!model) {
+  const parsed = parseCodexModelValue(model);
+  if (!parsed.slug) {
     return;
   }
 
   try {
     masterAppState.codexLastError = "";
-    await postJson("/api/codex/model", { model });
+    masterAppState.codexSelectedProvider = parsed.provider;
+    masterAppState.codexSelectedModel = parsed.slug;
+    await postJson("/api/codex/model", { provider: parsed.provider, model: parsed.slug });
     await refreshCodex();
   } catch (error) {
     masterAppState.codexLastError = error.message;
@@ -1560,6 +1896,14 @@ async function startNewCodexSession() {
     masterAppState.codexDraft = "";
     masterAppState.codexSelectedChatId = "";
     masterAppState.codexRecentsOpen = false;
+    masterAppState.codexScrollTop = 0;
+    masterAppState.codexStickToBottom = true;
+    setLatestCodex({
+      ...(masterAppState.latestCodex || {}),
+      currentSessionId: "",
+      activeRun: null,
+      pendingApproval: null
+    });
     renderCodexUi();
     await refreshCodex();
   } catch (error) {
@@ -1623,6 +1967,9 @@ function setLatestCodex(codex) {
     if (!masterAppState.codexSelectedModel && normalized.currentModel) {
       masterAppState.codexSelectedModel = normalized.currentModel;
     }
+    if (!masterAppState.codexSelectedProvider && normalized.currentProvider) {
+      masterAppState.codexSelectedProvider = normalized.currentProvider;
+    }
     if (masterAppState.codexSelectedChatId && normalized.recentChats?.length && !normalized.recentChats.some(item => item.id === masterAppState.codexSelectedChatId)) {
       masterAppState.codexSelectedChatId = "";
     }
@@ -1639,6 +1986,9 @@ function setLatestCodex(codex) {
   }
   if (!masterAppState.codexSelectedModel && normalized.currentModel) {
     masterAppState.codexSelectedModel = normalized.currentModel;
+  }
+  if (!masterAppState.codexSelectedProvider && normalized.currentProvider) {
+    masterAppState.codexSelectedProvider = normalized.currentProvider;
   }
   if (masterAppState.codexSelectedChatId && normalized.recentChats?.length && !normalized.recentChats.some(item => item.id === masterAppState.codexSelectedChatId)) {
     masterAppState.codexSelectedChatId = "";
@@ -1659,7 +2009,9 @@ function normalizeCodex(codex) {
     currentSessionId: codex?.currentSessionId || "",
     activeRun: codex?.activeRun || null,
     pendingApproval: codex?.pendingApproval || null,
+    currentProvider: codex?.currentProvider || "codex",
     currentModel: codex?.currentModel || "",
+    usage: codex?.usage || null,
     autoApproveReadOnlyCommands: !!codex?.autoApproveReadOnlyCommands,
     cliProbe: codex?.cliProbe || null,
     lastRelaunch: codex?.lastRelaunch || null
@@ -1713,6 +2065,18 @@ function serializeValue(value) {
   return JSON.stringify(value ?? null);
 }
 
+function encodeCodexModelValue(provider, slug) {
+  return `${provider || "codex"}::${slug || ""}`;
+}
+
+function parseCodexModelValue(value) {
+  const [provider, ...rest] = String(value || "").split("::");
+  return {
+    provider: provider || "codex",
+    slug: rest.join("::")
+  };
+}
+
 function getRenderableStatus(status) {
   if (!status) {
     return null;
@@ -1736,9 +2100,11 @@ function getRenderableStatus(status) {
     } : null,
     lastPackageResult: status.lastPackageResult ? {
       success: status.lastPackageResult.success,
+      sourceFileName: status.lastPackageResult.sourceFileName,
       appId: status.lastPackageResult.appId,
       version: status.lastPackageResult.version,
-      message: status.lastPackageResult.message
+      message: status.lastPackageResult.message,
+      timestampUtc: status.lastPackageResult.timestampUtc
     } : null,
     lastPublishResult: status.lastPublishResult ? {
       success: status.lastPublishResult.success,
@@ -1747,6 +2113,107 @@ function getRenderableStatus(status) {
       message: status.lastPublishResult.message
     } : null
   };
+}
+
+function getCodexUsageRows(usage) {
+  if (!usage) {
+    return [{ label: "Usage", value: "Loading..." }];
+  }
+
+  const rows = [
+    { label: "Provider", value: usage.provider || "-" },
+    { label: "Model", value: usage.model || "-" }
+  ];
+
+  (usage.items || []).forEach(item => {
+    rows.push({
+      label: item.label || "Usage",
+      value: item.display || "-"
+    });
+  });
+
+  return rows;
+}
+
+function captureCodexScrollState(container) {
+  if (!(container instanceof HTMLElement)) {
+    return {
+      top: masterAppState.codexScrollTop,
+      stickToBottom: masterAppState.codexStickToBottom
+    };
+  }
+
+  const maxScrollTop = Math.max(0, container.scrollHeight - container.clientHeight);
+  const top = Math.max(0, Math.min(container.scrollTop, maxScrollTop));
+  const distanceFromBottom = Math.max(0, container.scrollHeight - container.clientHeight - top);
+  const stickToBottom = distanceFromBottom <= 48;
+
+  masterAppState.codexScrollTop = top;
+  masterAppState.codexStickToBottom = stickToBottom;
+
+  return {
+    top,
+    stickToBottom
+  };
+}
+
+function restoreCodexScrollState(state) {
+  const container = document.querySelector(".codex-chat-scroll");
+  if (!(container instanceof HTMLElement)) {
+    return;
+  }
+
+  const shouldStick = !!state?.stickToBottom;
+  if (shouldStick) {
+    container.scrollTop = Math.max(0, container.scrollHeight - container.clientHeight);
+    masterAppState.codexScrollTop = container.scrollTop;
+    masterAppState.codexStickToBottom = true;
+    return;
+  }
+
+  const maxScrollTop = Math.max(0, container.scrollHeight - container.clientHeight);
+  container.scrollTop = Math.max(0, Math.min(state?.top ?? 0, maxScrollTop));
+  masterAppState.codexScrollTop = container.scrollTop;
+}
+
+function bindCodexScrollTracking() {
+  const container = document.querySelector(".codex-chat-scroll");
+  if (!(container instanceof HTMLElement)) {
+    return;
+  }
+
+  container.addEventListener("scroll", () => {
+    captureCodexScrollState(container);
+  }, { passive: true });
+}
+
+function initZoomLock() {
+  if (masterAppState.zoomLockBound) {
+    return;
+  }
+
+  const shouldBlockZoomHotkey = event => {
+    const key = String(event.key || "").toLowerCase();
+    return (event.ctrlKey || event.metaKey) && ["+", "=", "-", "_", "0"].includes(key);
+  };
+
+  document.addEventListener("wheel", event => {
+    if (event.ctrlKey || event.metaKey) {
+      event.preventDefault();
+    }
+  }, { passive: false });
+
+  document.addEventListener("keydown", event => {
+    if (shouldBlockZoomHotkey(event)) {
+      event.preventDefault();
+    }
+  });
+
+  document.addEventListener("gesturestart", event => event.preventDefault());
+  document.addEventListener("gesturechange", event => event.preventDefault());
+  document.addEventListener("gestureend", event => event.preventDefault());
+
+  masterAppState.zoomLockBound = true;
 }
 
 function getRenderableApps(apps) {
@@ -1812,36 +2279,10 @@ async function deleteApp(appId) {
   await postAction(`/api/apps/${encodeURIComponent(appId)}/delete`);
 }
 
-function ensureIconSprite() {
-  if (document.getElementById(ICON_SPRITE_ID)) {
-    return;
-  }
-
-  const sprite = document.createElement("svg");
-  sprite.id = ICON_SPRITE_ID;
-  sprite.className = "app-icon-sprite";
-  sprite.setAttribute("aria-hidden", "true");
-  sprite.setAttribute("focusable", "false");
-  sprite.innerHTML = `
-    <defs>
-      ${Object.entries(iconPaths).map(([name, path]) => `
-        <symbol id="${getIconId(name)}" viewBox="0 0 24 24">
-          <path d="${path}" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round"></path>
-        </symbol>
-      `).join("")}
-    </defs>
-  `;
-  document.body.prepend(sprite);
-}
-
-function getIconId(name) {
-  return `app-icon-${name}`;
-}
-
 function icon(name, className = "") {
-  const iconName = iconPaths[name] ? name : "globe";
+  const iconName = iconNames.has(name) ? name : "globe";
   const classAttribute = className ? ` ${className}` : "";
-  return `<svg class="app-icon${classAttribute}" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><use href="#${getIconId(iconName)}"></use></svg>`;
+  return `<span class="app-icon${classAttribute}" aria-hidden="true" style="--app-icon-mask: url('/icons/${iconName}.svg');"></span>`;
 }
 
 function iconWrap(inner) {

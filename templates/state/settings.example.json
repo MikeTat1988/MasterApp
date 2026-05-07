@@ -15,5 +15,17 @@
   "preferredRestartCommand": ".\\scripts\\run-masterapp.bat",
   "preferCodexJsonOutput": true,
   "codexHistoryLimit": 8,
-  "configBackupRetentionCount": 10
+  "codexMaxDecisionSteps": 20,
+  "ollamaMaxDecisionSteps": 36,
+  "codexUsageRequestsPer5Hours": 200,
+  "codexUsageRequestsPerWeek": 2000,
+  "configBackupRetentionCount": 10,
+  "lifeJournal": {
+    "codexExecutablePath": "codex",
+    "maxImagesForAnalysis": 16,
+    "analysisTimeoutSeconds": 240,
+    "autoFinalizeHourLocal": 3,
+    "photoMaxWidth": 900,
+    "jpegQuality": 75
+  }
 }
