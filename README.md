@@ -1,6 +1,6 @@
 # MasterApp
 
-![MasterApp workflow banner](docs/assets/masterapp-banner.svg)
+![MasterApp workflow banner](docs/assets/MasterAppBanner.png)
 
 MasterApp is a phone-first, AI-assisted rapid prototyping platform for turning ideas into small working web apps.
 
