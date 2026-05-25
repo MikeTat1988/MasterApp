@@ -1,8 +1,11 @@
 using MasterApp.Hosting;
+using MasterApp.Bootstrap;
 using MasterApp.Models;
 using MasterApp.Packages;
 using MasterApp.Utilities;
 using MasterApp.LifeJournal;
+using MasterApp.Diagnostics;
+using MasterApp.Storage;
 
 var failures = new List<string>();
 
@@ -209,6 +212,71 @@ AssertTrue(
     failures);
 reacquiredLock.Dispose();
 
+var deleteStateRoot = Path.Combine(Path.GetTempPath(), $"MasterApp-DeleteState-{Environment.ProcessId}-{Guid.NewGuid():N}");
+Directory.CreateDirectory(deleteStateRoot);
+var deletePaths = CreateTestAppPaths(deleteStateRoot);
+var deleteLog = new FileLogManager(deletePaths.LogsDirectory);
+var deleteStateStore = new RuntimeStateStore(deletePaths.RuntimeStateFile, deleteLog);
+var deleteAppRoot = Path.Combine(deletePaths.AppsDirectory, "locked-delete-app");
+var deleteInstallRoot = Path.Combine(deleteAppRoot, "1.0.0");
+Directory.CreateDirectory(deleteInstallRoot);
+var lockedDeleteFilePath = Path.Combine(deleteInstallRoot, "locked.txt");
+File.WriteAllText(lockedDeleteFilePath, "locked");
+deleteStateStore.UpsertInstalledApp(new InstalledAppState
+{
+    Id = "locked-delete-app",
+    Name = "Locked Delete App",
+    ActiveVersion = "1.0.0",
+    Versions = new List<string> { "1.0.0" },
+    Manifest = new AppManifest
+    {
+        Id = "locked-delete-app",
+        Name = "Locked Delete App",
+        Version = "1.0.0",
+        AppType = AppTypes.Static,
+        Entry = "index.html",
+        Launch = new AppLaunchManifest
+        {
+            Kind = LaunchKinds.Static
+        },
+        Display = new AppDisplayManifest
+        {
+            StoreVisible = true,
+            ShowInLibrary = true
+        }
+    },
+    RunState = new AppRunState
+    {
+        Status = "installed",
+        IsRunning = false
+    }
+});
+
+using (var lockedDeleteFile = new FileStream(lockedDeleteFilePath, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+{
+    using var deleteRuntime = new MasterAppRuntime(new BootstrapContext
+    {
+        Paths = deletePaths,
+        Settings = AppSettings.CreateDefault(),
+        Secrets = AppSecrets.CreateDefault(),
+        RuntimeStateStore = deleteStateStore,
+        Log = deleteLog,
+        ValidationIssues = Array.Empty<string>()
+    });
+    var deleteResult = deleteRuntime.DeleteApp("locked-delete-app");
+
+    AssertTrue(
+        deleteResult.Ok && deleteStateStore.GetApp("locked-delete-app") is null,
+        "Deleting an app should remove runtime state even when app folder cleanup is blocked, " +
+        "so it disappears from Store and Library.",
+        failures);
+}
+
+if (Directory.Exists(deleteAppRoot))
+{
+    Directory.Delete(deleteAppRoot, recursive: true);
+}
+
 var lifeRoot = Path.Combine(Path.GetTempPath(), $"MasterApp-LifeJournal-PolicyChecks-{Environment.ProcessId}-{Guid.NewGuid():N}");
 Directory.CreateDirectory(lifeRoot);
 var lifeLogger = new LifeJournalLogger(lifeRoot);
@@ -328,6 +396,26 @@ if (failures.Count > 0)
 
 Console.WriteLine("Policy checks passed.");
 return 0;
+
+static AppPaths CreateTestAppPaths(string root)
+{
+    return new AppPaths
+    {
+        RootDirectory = root,
+        StateDirectory = Path.Combine(root, "State"),
+        BackupsDirectory = Path.Combine(root, "State", "Backups"),
+        LogsDirectory = Path.Combine(root, "Logs"),
+        TempDirectory = Path.Combine(root, "Temp"),
+        AppsDirectory = Path.Combine(root, "Apps"),
+        AppSpecsDirectory = Path.Combine(root, "AppSpecs"),
+        SettingsFile = Path.Combine(root, "State", "settings.json"),
+        SecretsFile = Path.Combine(root, "State", "secrets.json"),
+        RuntimeStateFile = Path.Combine(root, "State", "runtime-state.json"),
+        RelaunchStateFile = Path.Combine(root, "State", "relaunch-state.json"),
+        ShutdownIntentFile = Path.Combine(root, "State", "shutdown-intent.json"),
+        WatchdogStateFile = Path.Combine(root, "State", "watchdog-state.json")
+    };
+}
 
 static void AssertTrue(bool condition, string message, List<string> failures)
 {

@@ -231,22 +231,44 @@ public sealed class MasterAppRuntime : IDisposable
                 throw new InvalidOperationException("APP_DELETE_PATH_INVALID");
             }
 
-            if (Directory.Exists(appRoot))
-            {
-                Directory.Delete(appRoot, recursive: true);
-            }
-
             if (!_context.RuntimeStateStore.RemoveApp(appId))
             {
                 return OperationResult.Failure($"APP_NOT_FOUND: {appId}");
             }
 
+            var cleanupWarning = TryDeleteAppDirectory(app.Id, appRoot);
+            if (!string.IsNullOrWhiteSpace(cleanupWarning))
+            {
+                return OperationResult.Success($"Deleted {GetPreferredDisplayName(app)} from MasterApp. Cleanup warning: {cleanupWarning}");
+            }
+
             _context.Log.Info("Runtime", $"Deleted app '{appId}' from {appRoot}.");
-            return OperationResult.Success($"Deleted {GetPreferredDisplayName(app)}.");
+            return OperationResult.Success($"Deleted {GetPreferredDisplayName(app)} from MasterApp.");
         }
         catch (Exception ex)
         {
             return OperationResult.Failure(ex.Message);
+        }
+    }
+
+    private string? TryDeleteAppDirectory(string appId, string appRoot)
+    {
+        if (!Directory.Exists(appRoot))
+        {
+            return null;
+        }
+
+        try
+        {
+            Directory.Delete(appRoot, recursive: true);
+            _context.Log.Info("Runtime", $"Deleted app files for '{appId}' from {appRoot}.");
+            return null;
+        }
+        catch (Exception ex)
+        {
+            var message = $"App files could not be removed yet: {ex.Message}";
+            _context.Log.Warn("Runtime", $"Deleted app '{appId}' from runtime state, but file cleanup failed for {appRoot}. {ex.Message}");
+            return message;
         }
     }
 
