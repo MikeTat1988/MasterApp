@@ -219,7 +219,11 @@ public sealed class MasterAppRuntime : IDisposable
                 return OperationResult.Failure($"APP_NOT_FOUND: {appId}");
             }
 
-            _appProcessManager.Stop(appId);
+            var stopResult = _appProcessManager.Stop(appId);
+            if (!stopResult.Ok)
+            {
+                _context.Log.Warn("Runtime", $"Delete requested for app '{appId}', but stopping it first failed: {stopResult.Message}");
+            }
 
             var appsRoot = Path.GetFullPath(_context.Paths.AppsDirectory)
                 .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
@@ -231,6 +235,8 @@ public sealed class MasterAppRuntime : IDisposable
                 throw new InvalidOperationException("APP_DELETE_PATH_INVALID");
             }
 
+            StopAppProcessesFromDirectory(app.Id, appRoot);
+
             if (!_context.RuntimeStateStore.RemoveApp(appId))
             {
                 return OperationResult.Failure($"APP_NOT_FOUND: {appId}");
@@ -239,7 +245,7 @@ public sealed class MasterAppRuntime : IDisposable
             var cleanupWarning = TryDeleteAppDirectory(app.Id, appRoot);
             if (!string.IsNullOrWhiteSpace(cleanupWarning))
             {
-                return OperationResult.Success($"Deleted {GetPreferredDisplayName(app)} from MasterApp. Cleanup warning: {cleanupWarning}");
+                return OperationResult.Success($"Deleted {GetPreferredDisplayName(app)} from MasterApp.");
             }
 
             _context.Log.Info("Runtime", $"Deleted app '{appId}' from {appRoot}.");
@@ -258,18 +264,87 @@ public sealed class MasterAppRuntime : IDisposable
             return null;
         }
 
-        try
+        const int maxAttempts = 3;
+        Exception? lastError = null;
+
+        for (var attempt = 1; attempt <= maxAttempts; attempt++)
         {
-            Directory.Delete(appRoot, recursive: true);
-            _context.Log.Info("Runtime", $"Deleted app files for '{appId}' from {appRoot}.");
-            return null;
+            try
+            {
+                Directory.Delete(appRoot, recursive: true);
+                _context.Log.Info("Runtime", $"Deleted app files for '{appId}' from {appRoot}.");
+                return null;
+            }
+            catch (Exception ex)
+            {
+                lastError = ex;
+                if (attempt < maxAttempts)
+                {
+                    Thread.Sleep(250);
+                }
+            }
         }
-        catch (Exception ex)
+
+        var message = $"App files could not be removed yet: {lastError?.Message}";
+        _context.Log.Warn("Runtime", $"Deleted app '{appId}' from runtime state, but file cleanup failed for {appRoot}. {lastError?.Message}");
+        return message;
+    }
+
+    private void StopAppProcessesFromDirectory(string appId, string appRoot)
+    {
+        var normalizedRoot = Path.GetFullPath(appRoot)
+            .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+
+        foreach (var process in Process.GetProcesses())
         {
-            var message = $"App files could not be removed yet: {ex.Message}";
-            _context.Log.Warn("Runtime", $"Deleted app '{appId}' from runtime state, but file cleanup failed for {appRoot}. {ex.Message}");
-            return message;
+            using (process)
+            {
+                string? processPath;
+                try
+                {
+                    if (process.HasExited)
+                    {
+                        continue;
+                    }
+
+                    processPath = process.MainModule?.FileName;
+                }
+                catch
+                {
+                    continue;
+                }
+
+                if (!IsPathUnderDirectory(processPath, normalizedRoot))
+                {
+                    continue;
+                }
+
+                try
+                {
+                    _context.Log.Info("Runtime", $"Stopping process {process.Id} from deleted app '{appId}': {processPath}");
+                    process.Kill(entireProcessTree: true);
+                    process.WaitForExit(5000);
+                }
+                catch (Exception ex)
+                {
+                    _context.Log.Warn("Runtime", $"Could not stop process {process.Id} while deleting app '{appId}': {ex.Message}");
+                }
+            }
         }
+    }
+
+    private static bool IsPathUnderDirectory(string? path, string directory)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            return false;
+        }
+
+        var fullPath = Path.GetFullPath(path)
+            .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+
+        return fullPath.StartsWith(directory + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) ||
+               fullPath.StartsWith(directory + Path.AltDirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
     }
 
     public void OpenDashboard() => ShellHelper.OpenPath(LocalUrl);

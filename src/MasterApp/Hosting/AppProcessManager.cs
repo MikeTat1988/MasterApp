@@ -105,9 +105,30 @@ public sealed class AppProcessManager : IDisposable
     {
         if (!_processes.TryRemove(appId, out var managed))
         {
+            var installed = _context.RuntimeStateStore.GetApp(appId);
+            string? persistedStopError = null;
+            if (installed is not null && TryStopPersistedProcess(installed, out persistedStopError))
+            {
+                var persistedStoppedState = new AppRunState
+                {
+                    Status = "stopped",
+                    IsRunning = false,
+                    Message = "App stopped.",
+                    StoppedAtUtc = DateTimeOffset.UtcNow
+                };
+                _context.RuntimeStateStore.UpdateRunState(appId, persistedStoppedState);
+                return OperationResult.Success("App stopped.");
+            }
+
+            if (!string.IsNullOrWhiteSpace(persistedStopError))
+            {
+                return OperationResult.Failure(persistedStopError);
+            }
+
             var stoppedState = new AppRunState
             {
                 Status = "stopped",
+                IsRunning = false,
                 Message = "App is not running.",
                 StoppedAtUtc = DateTimeOffset.UtcNow
             };
@@ -126,6 +147,7 @@ public sealed class AppProcessManager : IDisposable
             var stopped = new AppRunState
             {
                 Status = "stopped",
+                IsRunning = false,
                 Message = "App stopped.",
                 StoppedAtUtc = DateTimeOffset.UtcNow
             };
@@ -139,6 +161,72 @@ public sealed class AppProcessManager : IDisposable
         finally
         {
             managed.Process.Dispose();
+        }
+    }
+
+    private bool TryStopPersistedProcess(InstalledAppState installed, out string? error)
+    {
+        error = null;
+        var processId = installed.RunState.ProcessId;
+        if (processId is null ||
+            !installed.RunState.IsRunning ||
+            !string.Equals(installed.RunState.Status, "running", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        try
+        {
+            using var process = Process.GetProcessById(processId.Value);
+            if (process.HasExited)
+            {
+                return false;
+            }
+
+            if (!IsPersistedProcessForInstalledApp(installed, process))
+            {
+                _context.Log.Warn("AppProcessManager", $"Stored process {processId.Value} for app '{installed.Id}' is not running from the app install folder.");
+                return false;
+            }
+
+            _context.Log.Info("AppProcessManager", $"Stopping persisted process {processId.Value} for app '{installed.Id}'.");
+            process.Kill(entireProcessTree: true);
+            process.WaitForExit(5000);
+            return process.HasExited;
+        }
+        catch (ArgumentException)
+        {
+            return false;
+        }
+        catch (Exception ex)
+        {
+            error = ex.Message;
+            return false;
+        }
+    }
+
+    private bool IsPersistedProcessForInstalledApp(InstalledAppState installed, Process process)
+    {
+        try
+        {
+            var processPath = process.MainModule?.FileName;
+            if (string.IsNullOrWhiteSpace(processPath))
+            {
+                return false;
+            }
+
+            var installRoot = Path.GetFullPath(GetInstallRoot(installed))
+                .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            var processFullPath = Path.GetFullPath(processPath)
+                .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+
+            return processFullPath.StartsWith(installRoot + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) ||
+                   processFullPath.StartsWith(installRoot + Path.AltDirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
+        }
+        catch (Exception ex)
+        {
+            _context.Log.Warn("AppProcessManager", $"Could not verify stored process path for app '{installed.Id}': {ex.Message}");
+            return false;
         }
     }
 

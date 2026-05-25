@@ -6,6 +6,7 @@ using MasterApp.Utilities;
 using MasterApp.LifeJournal;
 using MasterApp.Diagnostics;
 using MasterApp.Storage;
+using System.Diagnostics;
 
 var failures = new List<string>();
 
@@ -266,15 +267,165 @@ using (var lockedDeleteFile = new FileStream(lockedDeleteFilePath, FileMode.Open
     var deleteResult = deleteRuntime.DeleteApp("locked-delete-app");
 
     AssertTrue(
-        deleteResult.Ok && deleteStateStore.GetApp("locked-delete-app") is null,
+        deleteResult.Ok &&
+        deleteStateStore.GetApp("locked-delete-app") is null &&
+        !deleteResult.Message.Contains("Cleanup warning", StringComparison.OrdinalIgnoreCase) &&
+        !deleteResult.Message.Contains("Access to the path", StringComparison.OrdinalIgnoreCase),
         "Deleting an app should remove runtime state even when app folder cleanup is blocked, " +
-        "so it disappears from Store and Library.",
+        "so it disappears from Store and Library without showing locked-file cleanup errors.",
         failures);
 }
 
 if (Directory.Exists(deleteAppRoot))
 {
     Directory.Delete(deleteAppRoot, recursive: true);
+}
+
+var staleProcessRoot = Path.Combine(Path.GetTempPath(), $"MasterApp-StaleProcess-{Environment.ProcessId}-{Guid.NewGuid():N}");
+Directory.CreateDirectory(staleProcessRoot);
+var staleProcessPaths = CreateTestAppPaths(staleProcessRoot);
+var staleProcessLog = new FileLogManager(staleProcessPaths.LogsDirectory);
+var staleProcessStateStore = new RuntimeStateStore(staleProcessPaths.RuntimeStateFile, staleProcessLog);
+var staleInstallRoot = Path.Combine(staleProcessPaths.AppsDirectory, "stale-process-app", "1.0.0");
+Directory.CreateDirectory(staleInstallRoot);
+var staleExePath = Path.Combine(staleInstallRoot, "stale.exe");
+File.Copy(Path.Combine(Environment.SystemDirectory, "cmd.exe"), staleExePath);
+using var staleProcess = Process.Start(new ProcessStartInfo(staleExePath)
+{
+    Arguments = "/c ping -n 60 127.0.0.1",
+    UseShellExecute = false,
+    CreateNoWindow = true
+}) ?? throw new InvalidOperationException("Could not start stale-process test helper.");
+try
+{
+    staleProcessStateStore.UpsertInstalledApp(new InstalledAppState
+    {
+        Id = "stale-process-app",
+        Name = "Stale Process App",
+        ActiveVersion = "1.0.0",
+        Versions = new List<string> { "1.0.0" },
+        Manifest = new AppManifest
+        {
+            Id = "stale-process-app",
+            Name = "Stale Process App",
+            Version = "1.0.0",
+            AppType = AppTypes.Portable,
+            Launch = new AppLaunchManifest
+            {
+                Kind = LaunchKinds.WebApp,
+                ExecutablePath = "stale.exe"
+            }
+        },
+        RunState = new AppRunState
+        {
+            Status = "running",
+            IsRunning = true,
+            ProcessId = staleProcess.Id,
+            Message = "Persisted process from an earlier MasterApp instance."
+        }
+    });
+
+    var staleStopResult = new AppProcessManager(new BootstrapContext
+    {
+        Paths = staleProcessPaths,
+        Settings = AppSettings.CreateDefault(),
+        Secrets = AppSecrets.CreateDefault(),
+        RuntimeStateStore = staleProcessStateStore,
+        Log = staleProcessLog,
+        ValidationIssues = Array.Empty<string>()
+    }).Stop("stale-process-app");
+    staleProcess.WaitForExit(5000);
+
+    AssertTrue(
+        staleStopResult.Ok && staleProcess.HasExited,
+        "Stopping an app should terminate a persisted running process even when this MasterApp instance did not start it.",
+        failures);
+}
+finally
+{
+    if (!staleProcess.HasExited)
+    {
+        staleProcess.Kill(entireProcessTree: true);
+        staleProcess.WaitForExit(5000);
+    }
+}
+
+var orphanDeleteRoot = Path.Combine(Path.GetTempPath(), $"MasterApp-OrphanDelete-{Environment.ProcessId}-{Guid.NewGuid():N}");
+Directory.CreateDirectory(orphanDeleteRoot);
+var orphanDeletePaths = CreateTestAppPaths(orphanDeleteRoot);
+var orphanDeleteLog = new FileLogManager(orphanDeletePaths.LogsDirectory);
+var orphanDeleteStateStore = new RuntimeStateStore(orphanDeletePaths.RuntimeStateFile, orphanDeleteLog);
+var orphanDeleteAppRoot = Path.Combine(orphanDeletePaths.AppsDirectory, "orphan-delete-app");
+var orphanDeleteInstallRoot = Path.Combine(orphanDeleteAppRoot, "1.0.0");
+Directory.CreateDirectory(orphanDeleteInstallRoot);
+var orphanDeleteExePath = Path.Combine(orphanDeleteInstallRoot, "orphan.exe");
+File.Copy(Path.Combine(Environment.SystemDirectory, "cmd.exe"), orphanDeleteExePath);
+using var orphanDeleteProcess = Process.Start(new ProcessStartInfo(orphanDeleteExePath)
+{
+    Arguments = "/c ping -n 60 127.0.0.1",
+    UseShellExecute = false,
+    CreateNoWindow = true
+}) ?? throw new InvalidOperationException("Could not start orphan-delete test helper.");
+try
+{
+    orphanDeleteStateStore.UpsertInstalledApp(new InstalledAppState
+    {
+        Id = "orphan-delete-app",
+        Name = "Orphan Delete App",
+        ActiveVersion = "1.0.0",
+        Versions = new List<string> { "1.0.0" },
+        Manifest = new AppManifest
+        {
+            Id = "orphan-delete-app",
+            Name = "Orphan Delete App",
+            Version = "1.0.0",
+            AppType = AppTypes.Portable,
+            Launch = new AppLaunchManifest
+            {
+                Kind = LaunchKinds.WebApp,
+                ExecutablePath = "orphan.exe"
+            }
+        },
+        RunState = new AppRunState
+        {
+            Status = "stopped",
+            IsRunning = false,
+            Message = "Runtime state is stale, but the app process still exists."
+        }
+    });
+
+    using var orphanDeleteRuntime = new MasterAppRuntime(new BootstrapContext
+    {
+        Paths = orphanDeletePaths,
+        Settings = AppSettings.CreateDefault(),
+        Secrets = AppSecrets.CreateDefault(),
+        RuntimeStateStore = orphanDeleteStateStore,
+        Log = orphanDeleteLog,
+        ValidationIssues = Array.Empty<string>()
+    });
+    var orphanDeleteResult = orphanDeleteRuntime.DeleteApp("orphan-delete-app");
+    orphanDeleteProcess.WaitForExit(5000);
+
+    AssertTrue(
+        orphanDeleteResult.Ok &&
+        orphanDeleteStateStore.GetApp("orphan-delete-app") is null &&
+        orphanDeleteProcess.HasExited &&
+        !Directory.Exists(orphanDeleteAppRoot),
+        "Deleting an app should stop orphaned app processes from the install folder and remove the app files.",
+        failures);
+}
+finally
+{
+    if (!orphanDeleteProcess.HasExited)
+    {
+        orphanDeleteProcess.Kill(entireProcessTree: true);
+        orphanDeleteProcess.WaitForExit(5000);
+    }
+
+    if (Directory.Exists(orphanDeleteAppRoot))
+    {
+        Directory.Delete(orphanDeleteAppRoot, recursive: true);
+    }
 }
 
 var lifeRoot = Path.Combine(Path.GetTempPath(), $"MasterApp-LifeJournal-PolicyChecks-{Environment.ProcessId}-{Guid.NewGuid():N}");
