@@ -1,6 +1,24 @@
 # MasterApp
 
-MasterApp is a Windows tray app that watches an inbox folder for app packages, installs them locally, serves them through a local web host, and can publish shareable builds to a synced folder such as Google Drive.
+![MasterApp phone-first app package flow](docs/assets/masterapp-banner.svg)
+
+MasterApp turns a phone and ChatGPT into a fast local app prototyping loop. Describe an app idea, ask ChatGPT to produce a ready-to-install ZIP that follows the MasterApp package contract, save that ZIP into a synced Google Drive folder, and the Windows machine at home picks it up, validates it, installs it, hosts it, and exposes it back to the phone.
+
+The Windows tray app is the infrastructure layer. The main product idea is the phone-first workflow: generate an app package, drop it into sync, try it on the phone, screenshot what is wrong, and ask ChatGPT for the next version.
+
+## How it works
+
+1. Describe an app idea to ChatGPT from the phone.
+2. ChatGPT generates a single ready-to-install `.zip` using the MasterApp package contract.
+3. Save or download the ZIP into the synced Google Drive `Incoming` folder.
+4. MasterApp on the Windows machine detects the ZIP, validates `app.manifest.json`, installs the app, hosts it locally, and publishes access through the configured remote path.
+5. Open the app on the phone. If it needs changes, take a screenshot, send it back to ChatGPT, and generate the next ZIP.
+
+## Why this project exists
+
+MasterApp exists to make the user flow simple by moving the hard parts into infrastructure. The package contract, validation, versioned install folders, local hosting, Google Drive sync, Cloudflare access, and publish flow are handled once by MasterApp instead of being rebuilt for every prototype.
+
+That leaves each generated app with a smaller job: be a normal installable package with clear metadata and predictable launch behavior.
 
 ## Clean project layout
 
