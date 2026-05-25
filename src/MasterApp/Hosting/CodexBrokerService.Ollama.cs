@@ -15,7 +15,7 @@ public sealed partial class CodexBrokerService
     private const string OllamaProvider = "ollama";
     private const string DefaultOllamaModel = "gemma4:e2b";
     private const string DefaultOllamaEndpoint = "http://localhost:11434";
-    private static readonly Regex SearchIntentRegex = new(@"(\b(search( the)? web|web search|internet search|latest|current|today|news|weather|forecast|temperature)\b|найди|поиск|интернет|веб|свеж|последн|новост|сегодня|погод|температур|прогноз)", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    private static readonly Regex SearchIntentRegex = new(@"(\b(search( the)? web|web search|internet search|latest|current|today|news|weather|forecast|temperature)\b|\u043d\u0430\u0439\u0434\u0438|\u043f\u043e\u0438\u0441\u043a|\u0438\u043d\u0442\u0435\u0440\u043d\u0435\u0442|\u0432\u0435\u0431|\u0441\u0432\u0435\u0436|\u043f\u043e\u0441\u043b\u0435\u0434\u043d|\u043d\u043e\u0432\u043e\u0441\u0442|\u0441\u0435\u0433\u043e\u0434\u043d\u044f|\u043f\u043e\u0433\u043e\u0434|\u0442\u0435\u043c\u043f\u0435\u0440\u0430\u0442\u0443\u0440|\u043f\u0440\u043e\u0433\u043d\u043e\u0437)", RegexOptions.IgnoreCase | RegexOptions.Compiled);
     private static readonly Regex HtmlLinkRegex = new(@"<a[^>]+href=""(?<href>[^""]+)""[^>]*>(?<text>.*?)</a>", RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
     private readonly string _ollamaExecutablePath = Path.Combine(
@@ -279,9 +279,9 @@ public sealed partial class CodexBrokerService
             || text.Contains("weather", StringComparison.OrdinalIgnoreCase)
             || text.Contains("forecast", StringComparison.OrdinalIgnoreCase)
             || text.Contains("temperature", StringComparison.OrdinalIgnoreCase)
-            || text.Contains("погода", StringComparison.OrdinalIgnoreCase)
-            || text.Contains("прогноз", StringComparison.OrdinalIgnoreCase)
-            || text.Contains("температура", StringComparison.OrdinalIgnoreCase);
+            || text.Contains("\u043f\u043e\u0433\u043e\u0434\u0430", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("\u043f\u0440\u043e\u0433\u043d\u043e\u0437", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("\u0442\u0435\u043c\u043f\u0435\u0440\u0430\u0442\u0443\u0440\u0430", StringComparison.OrdinalIgnoreCase);
     }
 
     private async Task<IReadOnlyList<WebSearchResult>> SearchWebAsync(string query, CancellationToken cancellationToken)

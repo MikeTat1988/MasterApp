@@ -490,14 +490,14 @@ public sealed partial class CodexBrokerService
         var text = prompt.ToLowerInvariant();
         if (!text.Contains("restart", StringComparison.Ordinal) &&
             !text.Contains("relaunch", StringComparison.Ordinal) &&
-            !text.Contains("перезап", StringComparison.Ordinal))
+            !text.Contains("\u043f\u0435\u0440\u0435\u0437\u0430\u043f", StringComparison.Ordinal))
         {
             return false;
         }
 
         return run.ChangedFiles.Count > 0 ||
                text.Contains("after the change", StringComparison.Ordinal) ||
-               text.Contains("после", StringComparison.Ordinal);
+               text.Contains("\u043f\u043e\u0441\u043b\u0435", StringComparison.Ordinal);
     }
 
     private Task<CodexApprovalDecisionRequest> WaitForApprovalAsync(
