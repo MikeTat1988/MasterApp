@@ -5,8 +5,6 @@
     <TargetFramework>net8.0-windows</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
-    <BaseIntermediateOutputPath>..\..\.tmp\PolicyChecks\obj\</BaseIntermediateOutputPath>
-    <BaseOutputPath>..\..\.tmp\PolicyChecks\bin\</BaseOutputPath>
     <NuGetAudit>false</NuGetAudit>
   </PropertyGroup>
 

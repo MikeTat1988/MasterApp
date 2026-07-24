@@ -4,11 +4,5 @@
   "lastPublishResult": null,
   "lastPackageScanAtUtc": null,
   "lastPackageScanReason": null,
-  "codex": {
-    "activeRun": null,
-    "pendingApproval": null,
-    "updatedAtUtc": null
-  },
-  "codexOperations": [],
-  "lastRelaunch": null
+  "activeLocalPort": null
 }

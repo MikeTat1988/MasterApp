@@ -11,22 +11,6 @@ const masterAppState = {
   latestLogName: "app",
   latestLogText: "Choose a log to inspect.",
   latestLogKey: "",
-  latestCodex: null,
-  latestCodexKey: "",
-  codexDraft: "",
-  codexSelectedMode: "auto",
-  codexSelectedWorkspace: "",
-  codexSelectedModel: "",
-  codexSelectedProvider: "",
-  codexSelectedChatId: "",
-  codexHistoryScope: "all",
-  codexRecentsOpen: false,
-  codexDetailsOpen: false,
-  codexConnectionState: "connecting",
-  codexLastError: "",
-  codexEventSource: null,
-  codexScrollTop: 0,
-  codexStickToBottom: true,
   zoomLockBound: false,
   pageMode: document.body?.dataset.page || "dashboard"
 };
@@ -50,8 +34,7 @@ const iconNames = new Set([
   "close",
   "globe",
   "export",
-  "trash",
-  "chat"
+  "trash"
 ]);
 
 const fallbackLogos = [
@@ -61,12 +44,6 @@ const fallbackLogos = [
   { glyph: "home", start: "#ff9fb0", end: "#d55470", color: "#fff2f5" },
   { glyph: "tunnel", start: "#b59cff", end: "#6c52db", color: "#f6f1ff" },
   { glyph: "logs", start: "#7fe1ff", end: "#2f8eb5", color: "#f1fcff" }
-];
-
-const quickActions = [
-  { label: "Scan inbox", icon: "inbox", action: () => postAction("/api/packages/rescan") },
-  { label: "Open tunnel", icon: "tunnel", action: () => openPublic() },
-  { label: "Logs", icon: "logs", action: () => setLogFocus() }
 ];
 
 function initMasterApp() {
@@ -82,12 +59,10 @@ function initMasterApp() {
   }
 
   renderAppShell({ preserveScroll: false });
-  connectCodexEvents();
   refreshAll();
   loadLog(masterAppState.latestLogName);
   setInterval(refreshStatus, 5000);
   setInterval(refreshApps, 9000);
-  setInterval(refreshCodex, 12000);
 }
 
 function renderAppShell(options = {}) {
@@ -107,13 +82,12 @@ function renderAppShell(options = {}) {
 
   appRoot.innerHTML = `
     <div class="app-frame">
-      <div class="app-content ${masterAppState.currentTab === "codex" ? "app-content--codex" : ""}">
+      <div class="app-content">
         ${Header()}
         ${SettingsSheet()}
         ${renderDashboardPage()}
         ${renderLibraryPage()}
         ${renderStorePage()}
-        ${renderCodexPage()}
       </div>
       ${BottomNav()}
     </div>
@@ -142,58 +116,6 @@ function renderAppShell(options = {}) {
       });
     }
   }
-}
-
-function renderCodexUi() {
-  if (masterAppState.currentTab !== "codex") {
-    renderAppShell();
-    return;
-  }
-
-  const appRoot = document.getElementById("app");
-  const scrollContainer = appRoot?.querySelector(".app-content");
-  const contentScrollTop = scrollContainer instanceof HTMLElement ? scrollContainer.scrollTop : 0;
-  const previousChatScroll = appRoot?.querySelector(".codex-chat-scroll");
-  const scrollState = captureCodexScrollState(previousChatScroll);
-  const activeElement = document.activeElement;
-  const activeId = activeElement instanceof HTMLElement ? activeElement.id : "";
-  const selectionStart = activeElement && "selectionStart" in activeElement ? activeElement.selectionStart : null;
-  const selectionEnd = activeElement && "selectionEnd" in activeElement ? activeElement.selectionEnd : null;
-  const existingPage = document.getElementById("page-codex");
-  if (!(existingPage instanceof HTMLElement)) {
-    renderAppShell();
-    return;
-  }
-
-  const wrapper = document.createElement("div");
-  wrapper.innerHTML = renderCodexPage().trim();
-  const nextPage = wrapper.firstElementChild;
-  if (!(nextPage instanceof HTMLElement)) {
-    renderAppShell();
-    return;
-  }
-
-  existingPage.replaceWith(nextPage);
-  bindCodexInteractions();
-
-  requestAnimationFrame(() => {
-    const nextScrollContainer = document.getElementById("app")?.querySelector(".app-content");
-    if (nextScrollContainer instanceof HTMLElement) {
-      nextScrollContainer.scrollTop = contentScrollTop;
-    }
-
-    restoreCodexScrollState(scrollState);
-
-    if (activeId) {
-      const nextActive = document.getElementById(activeId);
-      if (nextActive instanceof HTMLElement) {
-        nextActive.focus({ preventScroll: true });
-        if (typeof selectionStart === "number" && typeof selectionEnd === "number" && "setSelectionRange" in nextActive) {
-          nextActive.setSelectionRange(selectionStart, selectionEnd);
-        }
-      }
-    }
-  });
 }
 
 function bindInteractions() {
@@ -228,7 +150,7 @@ function bindInteractions() {
 
   document.querySelectorAll("[data-quick-action]").forEach((button, index) => {
     button.addEventListener("click", () => {
-      quickActions[index]?.action();
+      getQuickActions()[index]?.action();
     });
   });
 
@@ -260,107 +182,6 @@ function bindInteractions() {
       renderAppShell();
     });
   });
-
-  bindCodexInteractions();
-}
-
-function bindCodexInteractions() {
-  const codexPrompt = document.getElementById("codex-prompt");
-  if (codexPrompt) {
-    codexPrompt.value = masterAppState.codexDraft;
-    codexPrompt.addEventListener("input", event => {
-      masterAppState.codexDraft = event.target.value;
-    });
-  }
-
-  const codexWorkspace = document.getElementById("codex-workspace");
-  if (codexWorkspace) {
-    codexWorkspace.value = masterAppState.codexSelectedWorkspace;
-    codexWorkspace.addEventListener("change", event => {
-      masterAppState.codexSelectedWorkspace = event.target.value;
-      renderCodexUi();
-    });
-  }
-
-  const codexMode = document.getElementById("codex-mode");
-  if (codexMode) {
-    codexMode.value = masterAppState.codexSelectedMode || "auto";
-    codexMode.addEventListener("change", event => {
-      masterAppState.codexSelectedMode = event.target.value || "auto";
-      renderCodexUi();
-    });
-  }
-
-  const codexModel = document.getElementById("codex-model");
-  if (codexModel) {
-    codexModel.value = encodeCodexModelValue(
-      masterAppState.codexSelectedProvider || masterAppState.latestCodex?.currentProvider || "codex",
-      masterAppState.codexSelectedModel || masterAppState.latestCodex?.currentModel || ""
-    );
-    codexModel.addEventListener("change", async event => {
-      const parsed = parseCodexModelValue(event.target.value);
-      masterAppState.codexSelectedProvider = parsed.provider;
-      masterAppState.codexSelectedModel = parsed.slug;
-      renderCodexUi();
-      await updateCodexModel(event.target.value);
-    });
-  }
-
-  const codexForm = document.getElementById("codex-form");
-  if (codexForm) {
-    codexForm.addEventListener("submit", async event => {
-      event.preventDefault();
-      await submitCodexPrompt();
-    });
-  }
-
-  document.querySelectorAll("[data-codex-chat-id]").forEach(button => {
-    button.addEventListener("click", () => {
-      masterAppState.codexSelectedChatId = button.dataset.codexChatId || "";
-      masterAppState.codexRecentsOpen = false;
-      renderCodexUi();
-    });
-  });
-
-  document.querySelectorAll("[data-codex-toggle-recents]").forEach(element => {
-    element.addEventListener("toggle", event => {
-      masterAppState.codexRecentsOpen = !!event.target.open;
-    });
-  });
-
-  document.querySelectorAll("[data-codex-history-scope]").forEach(button => {
-    button.addEventListener("click", () => {
-      masterAppState.codexHistoryScope = button.dataset.codexHistoryScope || "all";
-      renderCodexUi();
-    });
-  });
-
-  document.querySelectorAll("[data-codex-toggle-details]").forEach(button => {
-    button.addEventListener("click", () => {
-      masterAppState.codexDetailsOpen = !masterAppState.codexDetailsOpen;
-      renderCodexUi();
-    });
-  });
-
-  document.querySelectorAll("[data-codex-approval]").forEach(button => {
-    button.addEventListener("click", async () => {
-      await resolveCodexApproval(button.dataset.codexApproval || "");
-    });
-  });
-
-  document.querySelectorAll("[data-codex-stop]").forEach(button => {
-    button.addEventListener("click", async () => {
-      await stopCodexSession();
-    });
-  });
-
-  document.querySelectorAll("[data-codex-new-session]").forEach(button => {
-    button.addEventListener("click", async () => {
-      await startNewCodexSession();
-    });
-  });
-
-  bindCodexScrollTracking();
 }
 
 function setTab(tab) {
@@ -374,6 +195,17 @@ function setLogFocus() {
   renderAppShell({ preserveScroll: false });
   const diagnostics = document.getElementById("diagnostics");
   diagnostics?.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+function getQuickActions() {
+  const status = masterAppState.latestStatus;
+  return [
+    { label: "Scan inbox", icon: "inbox", action: () => postAction("/api/packages/rescan") },
+    isLazyLocalStatus(status)
+      ? { label: "Phone QR", icon: "globe", action: () => openPhoneQr() }
+      : { label: "Open tunnel", icon: "tunnel", action: () => openPublic() },
+    { label: "Logs", icon: "logs", action: () => setLogFocus() }
+  ];
 }
 
 function Header() {
@@ -393,7 +225,6 @@ function Header() {
 
 function SettingsSheet() {
   const status = masterAppState.latestStatus;
-  const codexUsage = masterAppState.latestCodex?.usage || null;
 
   return `
     <section class="settings-sheet ${masterAppState.settingsOpen ? "is-open" : ""}" aria-hidden="${masterAppState.settingsOpen ? "false" : "true"}">
@@ -426,19 +257,10 @@ function SettingsSheet() {
         </details>
 
         <details class="settings-group">
-          <summary>Codex usage</summary>
-          <div class="settings-group-body">
-            <div class="details-grid codex-usage-grid">
-              ${renderDetailRows(getCodexUsageRows(codexUsage))}
-            </div>
-          </div>
-        </details>
-
-        <details class="settings-group">
           <summary>Logs</summary>
           <div class="settings-group-body">
             <div class="log-actions">
-              ${["app", "tunnel", "packages", "ui", "codex"].map(name => `
+              ${["app", "tunnel", "packages", "ui"].map(name => `
                 <button class="log-button ${masterAppState.latestLogName === name ? "is-active" : ""}" type="button" data-log-name="${name}">${escapeHtml(name)}</button>
               `).join("")}
             </div>
@@ -463,8 +285,7 @@ function BottomNav() {
   const items = [
     { id: "dashboard", label: "Dashboard", icon: "home" },
     { id: "library", label: "Library", icon: "library" },
-    { id: "store", label: "Store", icon: "store" },
-    { id: "codex", label: "Codex", icon: "chat" }
+    { id: "store", label: "Store", icon: "store" }
   ];
 
   return `
@@ -482,13 +303,14 @@ function renderDashboardPage() {
   const status = masterAppState.latestStatus;
   const apps = masterAppState.latestApps;
   const recent = getRecentActivities();
+  const isLazyLocal = isLazyLocalStatus(status);
 
   return `
     <section class="page ${masterAppState.currentTab === "dashboard" ? "is-active" : ""}" id="page-dashboard">
       <div class="page-head">
         <div>
           <h2 class="page-title">Dashboard</h2>
-          <p class="page-subtitle">Runtime, tunnel, and installs at a glance.</p>
+          <p class="page-subtitle">${escapeHtml(isLazyLocal ? "Runtime, local Wi-Fi access, and installs at a glance." : "Runtime, tunnel, and installs at a glance.")}</p>
         </div>
       </div>
 
@@ -497,7 +319,7 @@ function renderDashboardPage() {
       <div class="stats-grid">
         ${StatTile("Running apps", String(getRunningApps(apps).length), getRunningApps(apps).length ? `${getRunningApps(apps)[0].displayName} live` : "No active apps")}
         ${StatTile("Stopped apps", String(getStoppedApps(apps).length), getStoppedApps(apps).length ? `${getStoppedApps(apps)[0].displayName} ready` : "Everything is running")}
-        ${StatTile("Tunnel state", getTunnelStatValue(status), getTunnelStatMeta(status))}
+        ${StatTile(isLazyLocal ? "Access mode" : "Tunnel state", getAccessStatValue(status), getAccessStatMeta(status))}
         ${StatTile("Health", getHealthValue(status), getHealthMeta(status))}
       </div>
 
@@ -505,7 +327,7 @@ function renderDashboardPage() {
         <h3 class="section-title">Quick actions</h3>
       </div>
       <div class="quick-actions-grid">
-        ${quickActions.map((item, index) => QuickActionButton(item, index)).join("")}
+        ${getQuickActions().map((item, index) => QuickActionButton(item, index)).join("")}
       </div>
 
       <details class="activity-panel">
@@ -579,149 +401,11 @@ function renderStorePage() {
   `;
 }
 
-function renderCodexPage() {
-  const codex = masterAppState.latestCodex;
-  const allRecent = (codex?.recentChats || []).filter(item => item && item.updatedAtUtc);
-  const active = codex?.activeRun || null;
-  const pendingApproval = codex?.pendingApproval || null;
-  const currentSessionId = codex?.currentSessionId || "";
-  const workspaces = codex?.configuredWorkspaces || [];
-  const models = codex?.availableModels || [];
-  const modelChoices = models.length ? models : (codex?.currentModel ? [{ slug: codex.currentModel, displayName: codex.currentModel }] : []);
-  const visibleModelChoices = modelChoices.length ? modelChoices : [{ slug: "", displayName: "Default" }];
-  const visibleWorkspaces = workspaces.length ? workspaces : [{ path: "", label: "General" }];
-  const selectedWorkspace = masterAppState.codexSelectedWorkspace || workspaces[0]?.path || "";
-  const selectedProvider = masterAppState.codexSelectedProvider || codex?.currentProvider || "codex";
-  const selectedModel = masterAppState.codexSelectedModel || codex?.currentModel || modelChoices[0]?.slug || "";
-  const selectedModelKey = encodeCodexModelValue(selectedProvider, selectedModel);
-  const scopedRecent = getScopedCodexRecentChats(allRecent, selectedWorkspace);
-  const recent = masterAppState.codexHistoryScope === "all" ? allRecent : scopedRecent;
-  const selectedRecent = recent.find(item => item.id === masterAppState.codexSelectedChatId)
-    || allRecent.find(item => item.id === masterAppState.codexSelectedChatId)
-    || (currentSessionId ? allRecent.find(item => item.id === currentSessionId) : null)
-    || null;
-  const isViewingCurrentSession = !!selectedRecent && selectedRecent.id === currentSessionId;
-  const isViewingEmptyCurrentSession = !selectedRecent && !currentSessionId && !masterAppState.codexSelectedChatId;
-  const isBusy = !!active && !isCodexRunTerminal(active.status);
-  const status = getCodexPrimaryStatus(codex, active, pendingApproval, codex?.cliResolutionStatus, codex?.cliProbe);
-
-  return `
-    <section class="page ${masterAppState.currentTab === "codex" ? "is-active" : ""}" id="page-codex">
-      <section class="codex-phone-shell ${masterAppState.codexDetailsOpen ? "is-details-open" : ""}">
-        <article class="codex-chat-surface">
-          <div class="codex-chat-topbar">
-            <button class="icon-button codex-settings-button" type="button" aria-label="Open Codex settings" data-toggle-settings>${iconWrap(icon("settings"))}</button>
-            <div class="codex-top-status">
-              <span class="status-dot ${status.tone === "success" ? "is-success" : status.tone === "danger" ? "is-danger" : status.tone === "warning" ? "is-warning" : ""}"></span>
-              <span>${escapeHtml(status.label)}</span>
-            </div>
-            <div class="codex-top-actions">
-              <button class="secondary-button codex-details-button" type="button" data-codex-toggle-details>${escapeHtml(masterAppState.codexDetailsOpen ? "Hide activity" : "Activity")}</button>
-              ${renderCodexRecentsPanel(allRecent, recent, selectedRecent, selectedWorkspace)}
-            </div>
-          </div>
-          <div class="codex-chat-scroll">
-            <div class="codex-transcript">
-              ${renderCodexConversation(selectedRecent, active, pendingApproval, isViewingCurrentSession || isViewingEmptyCurrentSession)}
-            </div>
-          </div>
-        </article>
-
-        ${masterAppState.codexDetailsOpen ? renderCodexActivityPanel(codex, active, pendingApproval, selectedRecent, selectedWorkspace) : ""}
-
-        <form id="codex-form" class="codex-composer-card codex-form codex-form--chat-first">
-          <div class="codex-composer-top">
-            <label class="codex-field codex-field--composer" for="codex-prompt">
-              <textarea id="codex-prompt" class="codex-textarea codex-textarea--chat" rows="3" placeholder="Ask Codex something..."></textarea>
-            </label>
-            <div class="codex-composer-actions">
-              <button class="secondary-button codex-new-chat-button" type="button" data-codex-new-session ${isBusy ? "disabled" : ""}>New chat</button>
-              <button class="primary-button codex-send-button" type="submit" ${isBusy ? "disabled" : ""}>Send</button>
-            </div>
-          </div>
-
-          <div class="codex-control-row">
-            <label class="codex-compact-field" for="codex-model">
-              <span class="codex-compact-label">Model</span>
-              <select id="codex-model" class="codex-select codex-select--compact">
-                ${visibleModelChoices.map(item => `
-                  <option value="${escapeAttribute(encodeCodexModelValue(item.provider || "codex", item.slug))}" ${selectedModelKey === encodeCodexModelValue(item.provider || "codex", item.slug) ? "selected" : ""}>${escapeHtml(item.displayName || item.slug)}</option>
-                `).join("")}
-              </select>
-            </label>
-            <label class="codex-compact-field" for="codex-workspace">
-              <span class="codex-compact-label">Context</span>
-              <select id="codex-workspace" class="codex-select codex-select--compact">
-                ${visibleWorkspaces.map(item => `
-                  <option value="${escapeAttribute(item.path)}" ${selectedWorkspace === item.path ? "selected" : ""}>${escapeHtml(formatCodexContextLabel(item))}</option>
-                `).join("")}
-              </select>
-            </label>
-            <button class="secondary-button codex-compact-stop" type="button" data-codex-stop ${isBusy ? "" : "disabled"}>
-              <span class="codex-compact-label">Stop</span>
-              <span class="codex-compact-value">${isBusy ? "Running" : "Idle"}</span>
-            </button>
-          </div>
-
-          ${masterAppState.codexLastError ? `<div class="codex-error codex-error--inline">${escapeHtml(masterAppState.codexLastError)}</div>` : ""}
-        </form>
-      </section>
-    </section>
-  `;
-}
-
-function getCodexPrimaryStatus(codex, active, pendingApproval, resolutionState, probe) {
-  if (masterAppState.codexLastError) {
-    return { tone: "danger", label: "Not working", message: masterAppState.codexLastError };
-  }
-
-  if (resolutionState !== "ready") {
-    return { tone: resolutionState === "missing" ? "danger" : "warning", label: "Not ready", message: codex?.cliResolutionError || "Checking the local Codex CLI." };
-  }
-
-  if (!probe?.isReady) {
-    return { tone: probe?.lastError ? "danger" : "warning", label: "Not ready", message: probe?.lastError || "Probing Codex JSON mode." };
-  }
-
-  if (pendingApproval) {
-    return { tone: "warning", label: "Needs approval", message: pendingApproval.summary || "Codex is waiting for your approval." };
-  }
-
-  if (active && !isCodexRunTerminal(active.status)) {
-    return { tone: "warning", label: "Working", message: "Codex is working on the current request." };
-  }
-
-  return {
-    tone: masterAppState.codexConnectionState === "open" ? "success" : "warning",
-    label: masterAppState.codexConnectionState === "open" ? "Ready" : "Connecting",
-    message: masterAppState.codexConnectionState === "open" ? "Local Codex session is ready." : "Trying to reconnect to Codex events."
-  };
-}
-
-function renderCodexRecentsPanel(allRecent, recent, selectedRecent, selectedWorkspace) {
-  const scopedCount = getScopedCodexRecentChats(allRecent, selectedWorkspace).length;
-  const allCount = allRecent.length;
-  return `
-    <details class="codex-recents-panel" data-codex-toggle-recents ${masterAppState.codexRecentsOpen ? "open" : ""}>
-      <summary class="codex-recents-summary">Chat history</summary>
-      <div class="codex-recents-body">
-        <div class="codex-history-scope-row">
-          <button class="codex-scope-button ${masterAppState.codexHistoryScope !== "all" ? "is-active" : ""}" type="button" data-codex-history-scope="context">This context ${scopedCount ? `(${scopedCount})` : ""}</button>
-          <button class="codex-scope-button ${masterAppState.codexHistoryScope === "all" ? "is-active" : ""}" type="button" data-codex-history-scope="all">All ${allCount ? `(${allCount})` : ""}</button>
-        </div>
-        <div class="codex-recents-note">${recent.length ? `${recent.length} visible chats` : "No chats for this context yet"}</div>
-        ${recent.length ? recent.map(item => `
-          <button class="codex-recent-item ${selectedRecent?.id === item.id ? "is-active" : ""}" type="button" data-codex-chat-id="${escapeAttribute(item.id)}">
-            <span class="codex-recent-title">${escapeHtml(item.title || "Untitled chat")}</span>
-            <span class="codex-recent-meta">${escapeHtml(formatCodexRecentMeta(item))}</span>
-          </button>
-        `).join("") : `<div class="empty-state codex-empty-state">Recent chats will show up here.</div>`}
-      </div>
-    </details>
-  `;
-}
-
 function HeroStatusCard(status) {
+  if (isLazyLocalStatus(status)) {
+    return LazyLocalStatusCard(status);
+  }
+
   const tunnel = status?.tunnel;
   const packageResult = status?.lastPackageResult;
   const isRunning = !!tunnel?.isRunning;
@@ -739,6 +423,46 @@ function HeroStatusCard(status) {
       <div class="hero-actions hero-actions--compact">
         <button class="primary-button" type="button" onclick="postAction('${isRunning ? "/api/tunnel/restart" : "/api/tunnel/start"}')">${isRunning ? "Reconnect" : "Start tunnel"}</button>
         <button class="secondary-button" type="button" ${isRunning ? "" : "disabled"} onclick="postAction('/api/tunnel/stop')">Stop</button>
+      </div>
+      ${packageResult ? `
+        <div class="hero-install-status">
+          <div class="hero-top hero-top--compact">
+            <div class="hero-kicker hero-kicker--tight">${statusDot(packageResult.success ? "success" : "danger")} Packages</div>
+            ${StatusChip(packageResult.success ? "Installed" : "Failed", packageResult.success ? "success" : "danger")}
+          </div>
+          <div class="details-grid">
+            ${renderPackageResultRows(packageResult)}
+          </div>
+        </div>
+      ` : ""}
+    </article>
+  `;
+}
+
+function LazyLocalStatusCard(status) {
+  const packageResult = status?.lastPackageResult;
+  const lanUrl = status?.lanUrl || status?.localUrl || "";
+  const wifiReady = !!status?.wifiAvailable;
+  const chip = StatusChip(wifiReady ? "Wi-Fi ready" : "Local only", wifiReady ? "success" : "warning");
+  const detailRows = [
+    { label: "Phone URL", value: lanUrl || "-" },
+    { label: "Port", value: status?.activeLocalPort ? String(status.activeLocalPort) : "-" },
+    { label: "Network", value: status?.wifiNetwork || status?.wifiInterface || "-" },
+    { label: "Sessions", value: String(status?.activeRemoteSessions ?? 0) }
+  ];
+
+  return `
+    <article class="hero-status-card hero-status-card--compact">
+      <div class="hero-top hero-top--compact">
+        <div class="hero-kicker hero-kicker--tight">${statusDot(wifiReady ? "success" : "warning")} Local Wi-Fi</div>
+        ${chip}
+      </div>
+      <div class="hero-actions hero-actions--compact">
+        <button class="primary-button" type="button" onclick="openPhoneQr()">Show phone QR</button>
+        <button class="secondary-button" type="button" ${lanUrl ? "" : "disabled"} data-open-link="${escapeAttribute(lanUrl)}">Open local URL</button>
+      </div>
+      <div class="details-grid">
+        ${renderDetailRows(detailRows)}
       </div>
       ${packageResult ? `
         <div class="hero-install-status">
@@ -993,6 +717,27 @@ function getRunningApps(apps) {
 function getStoppedApps(apps) {
   return apps.filter(app => !app.runState?.isRunning);
 }
+
+function isLazyLocalStatus(status) {
+  return String(status?.runtimeMode || "").toLowerCase() === "lazy-local";
+}
+
+function getAccessStatValue(status) {
+  if (isLazyLocalStatus(status)) {
+    return status?.wifiAvailable ? "Wi-Fi" : "Local";
+  }
+
+  return getTunnelStatValue(status);
+}
+
+function getAccessStatMeta(status) {
+  if (isLazyLocalStatus(status)) {
+    return status?.lanUrl || status?.localUrl || "Waiting for local URL";
+  }
+
+  return getTunnelStatMeta(status);
+}
+
 function getTunnelStatValue(status) {
   if (!status?.tunnel) {
     return "Checking";
@@ -1037,14 +782,24 @@ function getStatusDetails(status) {
     return [{ label: "Status", value: "Loading..." }];
   }
 
-  return [
+  const rows = [
+    { label: "Runtime mode", value: status.runtimeMode || "standard" },
     { label: "Local URL", value: status.localUrl || "-" },
-    { label: "Public URL", value: status.publicUrl || "-" },
-    { label: "Hostname", value: status.publicHostname || "-" },
+    ...(isLazyLocalStatus(status) ? [
+      { label: "Phone URL", value: status.lanUrl || "-" },
+      { label: "Active port", value: status.activeLocalPort ? String(status.activeLocalPort) : "-" },
+      { label: "Wi-Fi", value: status.wifiAvailable ? (status.wifiInterface || "Available") : "Not detected" },
+      { label: "Remote sessions", value: String(status.activeRemoteSessions ?? 0) }
+    ] : [
+      { label: "Public URL", value: status.publicUrl || "-" },
+      { label: "Hostname", value: status.publicHostname || "-" }
+    ]),
     { label: "Settings", value: status.settingsFile || "-" },
     { label: "Logs", value: status.logsDirectory || "-" },
     { label: "Published", value: status.publishedDirectory || "-" }
   ];
+
+  return rows;
 }
 
 function renderDetailRows(rows) {
@@ -1084,500 +839,6 @@ function renderIssueRows(issues) {
       <span class="value">${escapeHtml(issue)}</span>
     </div>
   `).join("");
-}
-
-function renderCodexConversation(selectedRecent, active, pendingApproval, isViewingCurrentSession) {
-  const messages = selectedRecent?.messages || [];
-  const parts = [];
-
-  if (!messages.length) {
-    if (isViewingCurrentSession && active?.prompt) {
-      parts.push(renderCodexMessage({
-        role: "user",
-        text: active.prompt
-      }));
-    } else {
-      parts.push(renderCodexWelcomeCard());
-    }
-  } else {
-    if (selectedRecent) {
-      parts.push(renderCodexSessionMarker(selectedRecent, isViewingCurrentSession));
-    }
-
-    messages.forEach(message => {
-      parts.push(renderCodexMessage(message));
-    });
-  }
-
-  if (isViewingCurrentSession) {
-    if (pendingApproval) {
-      parts.push(renderCodexApprovalCard(pendingApproval));
-    }
-    parts.push(renderCodexProcessing(active, pendingApproval));
-    const activeFinalAlreadyVisible = messages.some(message =>
-      message?.runId && active?.id &&
-      message.runId === active.id &&
-      (message.role || "").toLowerCase() === "assistant");
-    if (!activeFinalAlreadyVisible) {
-      parts.push(renderCodexFinalResponse(active));
-    }
-  }
-
-  return parts.join("");
-}
-
-function renderCodexWelcomeCard() {
-  return `
-    <article class="codex-message-card codex-message-card--preview codex-message-card--hint">
-      <div class="codex-message-meta">
-        <span>Start here</span>
-      </div>
-      <div class="codex-message-assistant">Type a request below and your reply will appear here. Chat history stays available from the button above.</div>
-    </article>
-  `;
-}
-
-function renderCodexSessionMarker(session, isViewingCurrentSession) {
-  return `
-    <article class="codex-message-card codex-message-card--preview codex-history-preview">
-      <div class="codex-history-preview-head">
-        <div>
-          <div class="codex-message-meta">
-            <span>${isViewingCurrentSession ? "Current session" : "From chat history"}</span>
-          </div>
-          <h3 class="section-title">${escapeHtml(session.title || "Untitled chat")}</h3>
-        </div>
-        <div class="codex-history-preview-meta">${escapeHtml(timeAgo(session.updatedAtUtc))}</div>
-      </div>
-    </article>
-  `;
-}
-
-function renderCodexMessage(message) {
-  const role = (message?.role || "assistant").toLowerCase();
-  const text = message?.text || "";
-  const status = (message?.status || "completed").toLowerCase();
-  const cardClass = role === "user"
-    ? "codex-message-card codex-message-card--user"
-    : status === "failed" || status === "stopped"
-      ? "codex-message-card codex-message-card--assistant codex-message-card--failure"
-      : "codex-message-card codex-message-card--assistant";
-
-  return `
-    <article class="${cardClass}">
-      ${role === "assistant" && status !== "completed" ? `<div class="codex-message-meta"><span>${escapeHtml(status)}</span></div>` : ""}
-      <div class="${role === "user" ? "codex-message-user" : "codex-message-assistant"}">${escapeHtml(text)}</div>
-    </article>
-  `;
-}
-
-function renderCodexProcessing(active, pendingApproval) {
-  if (!active || pendingApproval || isCodexRunTerminal(active.status)) {
-    return "";
-  }
-
-  const latest = getCodexLatestActivity(active);
-  return `
-    <article class="codex-message-card codex-message-card--assistant codex-message-card--processing">
-      <div class="codex-message-meta">
-        <span>Working on it</span>
-      </div>
-      <div class="codex-processing">
-        <span class="codex-spinner" aria-hidden="true"></span>
-        <span>${escapeHtml(latest || "Processing...")}</span>
-      </div>
-    </article>
-  `;
-}
-
-function renderCodexActivityPanel(codex, active, pendingApproval, selectedRecent, selectedWorkspace) {
-  const activity = getCodexActivityItems(active, pendingApproval);
-  const changedFiles = active?.changedFiles || [];
-  return `
-    <aside class="codex-activity-panel" aria-label="Codex activity">
-      <div class="codex-activity-head">
-        <div>
-          <div class="codex-message-meta"><span>On demand</span></div>
-          <h3 class="section-title">Activity</h3>
-        </div>
-        <button class="icon-button" type="button" aria-label="Close activity" data-codex-toggle-details>${iconWrap(icon("close"))}</button>
-      </div>
-      <div class="codex-activity-section">
-        <div class="codex-activity-label">Current context</div>
-        <div class="codex-activity-value">${escapeHtml(trimPath(selectedWorkspace || selectedRecent?.cwd || "General"))}</div>
-      </div>
-      ${renderCodexSummaryChips(active)}
-      <div class="codex-activity-section">
-        <div class="codex-activity-label">Timeline</div>
-        ${activity.length ? activity.map(renderCodexActivityItem).join("") : `<div class="empty-state codex-empty-state">Activity will appear while Codex works.</div>`}
-      </div>
-      <details class="codex-activity-section">
-        <summary class="codex-activity-summary">Changed files</summary>
-        ${renderCodexList(changedFiles, "No changed files reported yet.")}
-      </details>
-      <details class="codex-activity-section">
-        <summary class="codex-activity-summary">Build and restart</summary>
-        ${renderBuildAndRestart(active, codex?.lastRelaunch)}
-      </details>
-      <details class="codex-activity-section">
-        <summary class="codex-activity-summary">Raw live log</summary>
-        ${active?.logLines?.length ? `<pre class="codex-command-preview codex-log-preview">${escapeHtml(active.logLines.join("\n"))}</pre>` : `<div class="empty-state codex-empty-state">No live log lines yet.</div>`}
-      </details>
-    </aside>
-  `;
-}
-
-function renderCodexActivityItem(item) {
-  return `
-    <div class="codex-activity-item">
-      <span class="codex-activity-dot"></span>
-      <div>
-        <div class="codex-activity-title">${escapeHtml(item.title)}</div>
-        ${item.detail ? `<div class="codex-activity-detail">${escapeHtml(item.detail)}</div>` : ""}
-      </div>
-    </div>
-  `;
-}
-
-function renderCodexApprovalCard(approval) {
-  if (!approval) {
-    return "";
-  }
-
-  const canTrustWorkspace = !!approval.canTrustWorkspace && !!approval.trustWorkspacePath;
-  const approvalButtons = canTrustWorkspace
-    ? `
-        <button class="primary-button" type="button" data-codex-approval="approve-once">Continue once</button>
-        <button class="secondary-button" type="button" data-codex-approval="trust">Trust workspace</button>
-        <button class="secondary-button" type="button" data-codex-approval="reject">Not now</button>
-      `
-    : `
-        <button class="primary-button" type="button" data-codex-approval="approve">Continue</button>
-        <button class="secondary-button" type="button" data-codex-approval="reject">Not now</button>
-      `;
-
-  return `
-    <article class="codex-message-card codex-message-card--approval">
-      <div class="codex-message-meta">
-        <span>Needs your permission</span>
-      </div>
-      <div class="codex-approval-copy">${escapeHtml(approval.summary || "Codex wants to continue with the next step.")}</div>
-      ${canTrustWorkspace ? `<div class="codex-approval-copy">Working directory is outside trusted workspaces: ${escapeHtml(approval.trustWorkspacePath)}</div>` : ""}
-      ${approval.command ? `<pre class="codex-command-preview">${escapeHtml(approval.command || "")}</pre>` : ""}
-      <div class="codex-form-actions">
-        ${approvalButtons}
-      </div>
-    </article>
-  `;
-}
-
-function renderCodexFinalResponse(active) {
-  if (!active) {
-    return "";
-  }
-
-  if (active.status === "stopped") {
-    return `
-      <article class="codex-message-card codex-message-card--assistant codex-message-card--failure">
-        <div class="codex-message-meta">
-          <span>Stopped</span>
-        </div>
-        <div class="codex-message-assistant">${escapeHtml(active.failureMessage || "The session was stopped before Codex returned a final answer.")}</div>
-      </article>
-    `;
-  }
-
-  if (active.status === "failed") {
-    return `
-      <article class="codex-message-card codex-message-card--assistant codex-message-card--failure">
-        <div class="codex-message-meta">
-          <span>Failed</span>
-        </div>
-        <div class="codex-message-assistant">${escapeHtml(active.failureMessage || "The run failed before Codex returned a final answer.")}</div>
-      </article>
-    `;
-  }
-
-  if (!active.responseText) {
-    return "";
-  }
-
-  return `
-    <article class="codex-message-card codex-message-card--assistant">
-      <div class="codex-message-assistant">${escapeHtml(active.responseText || "")}</div>
-    </article>
-  `;
-}
-
-function formatCodexContextLabel(workspace) {
-  const raw = (workspace?.label || trimPath(workspace?.path || "") || "General").trim();
-  if (!raw) {
-    return "General";
-  }
-
-  if (/masterapp/i.test(raw)) {
-    return "MasterApp";
-  }
-
-  if (/apps?/i.test(raw)) {
-    return "Installed apps";
-  }
-
-  return raw
-    .replace(/[-_]+/g, " ")
-    .replace(/\b\w/g, character => character.toUpperCase());
-}
-
-function renderCodexSummaryChips(active) {
-  if (!active) {
-    return "";
-  }
-
-  const chips = [];
-  const taskModeChip = getCodexTaskModeChip(active);
-  if (taskModeChip) {
-    chips.push(StatusChip(taskModeChip.label, taskModeChip.tone));
-  }
-  if (active.changedFiles?.length) {
-    chips.push(StatusChip(`${active.changedFiles.length} files changed`, "neutral"));
-  }
-  if (active.buildResult?.status && active.buildResult.status !== "not-requested") {
-    chips.push(StatusChip(active.buildResult.success ? "Build passed" : active.buildResult.status === "running" ? "Build running" : "Build failed", active.buildResult.success ? "success" : active.buildResult.status === "running" ? "warning" : "danger"));
-  }
-  if (active.restartStatus?.status) {
-    chips.push(StatusChip(active.restartStatus.status === "scheduled" || active.restartStatus.status === "launched" ? "Restart scheduled" : "Restart failed", active.restartStatus.status === "scheduled" || active.restartStatus.status === "launched" ? "success" : "danger"));
-  }
-
-  return chips.length ? `<div class="codex-chip-row codex-chip-row--summary">${chips.join("")}</div>` : "";
-}
-
-function getCodexTaskModeChip(active) {
-  if (!active?.taskMode) {
-    return null;
-  }
-
-  const label = formatCodexModeLabel(active.taskMode);
-  const source = active.taskModeSource === "manual"
-    ? "manual"
-    : active.taskModeConfidence > 0
-      ? `auto ${Math.round(active.taskModeConfidence * 100)}%`
-      : "auto";
-
-  return {
-    label: `${label} mode (${source})`,
-    tone: active.taskModeSource === "manual" ? "success" : "neutral"
-  };
-}
-
-function formatCodexTaskMode(active) {
-  return active?.taskMode ? formatCodexModeLabel(active.taskMode) : "-";
-}
-
-function formatCodexTaskModeSource(active) {
-  if (!active?.taskModeSource) {
-    return "-";
-  }
-
-  return active.taskModeSource === "manual" ? "Manual override" : "Auto";
-}
-
-function formatCodexTaskModeConfidence(active) {
-  return typeof active?.taskModeConfidence === "number" && active.taskModeConfidence > 0
-    ? `${Math.round(active.taskModeConfidence * 100)}%`
-    : "-";
-}
-
-function formatCodexModeLabel(mode) {
-  switch ((mode || "").toLowerCase()) {
-    case "action":
-      return "Action";
-    case "investigate":
-      return "Investigate";
-    case "code":
-      return "Code";
-    case "ask":
-      return "Ask";
-    default:
-      return "Auto";
-  }
-}
-
-function renderCodexDetail(label, value) {
-  return `
-    <div class="detail-row">
-      <span class="field-label">${escapeHtml(label)}</span>
-      <span class="value">${escapeHtml(value)}</span>
-    </div>
-  `;
-}
-
-function renderCodexList(items, emptyMessage) {
-  if (!items || !items.length) {
-    return `<div class="empty-state">${escapeHtml(emptyMessage)}</div>`;
-  }
-
-  return `
-    <div class="codex-bullet-list">
-      ${items.map(item => `<div class="codex-bullet-item">${escapeHtml(item)}</div>`).join("")}
-    </div>
-  `;
-}
-
-function renderBuildAndRestart(active, lastRelaunch) {
-  const build = active?.buildResult;
-  const restart = active?.restartStatus || lastRelaunch;
-  const rows = [
-    { label: "Task mode", value: formatCodexTaskMode(active) },
-    { label: "Mode source", value: formatCodexTaskModeSource(active) },
-    { label: "Mode confidence", value: formatCodexTaskModeConfidence(active) },
-    { label: "Build status", value: build?.status || "Not requested" },
-    { label: "Build summary", value: build?.summary || "-" },
-    { label: "Restart status", value: restart?.status || "Not requested" },
-    { label: "Restart message", value: restart?.message || "-" },
-    { label: "Backup", value: restart?.backupDirectory || "-" }
-  ];
-
-  return `<div class="details-grid">${renderDetailRows(rows)}</div>`;
-}
-
-function getScopedCodexRecentChats(chats, selectedWorkspace) {
-  if (masterAppState.codexHistoryScope === "all") {
-    return chats;
-  }
-
-  const selected = normalizePathForCompare(selectedWorkspace);
-  if (!selected) {
-    return chats.filter(item => !item.cwd);
-  }
-
-  return chats.filter(item => normalizePathForCompare(item.cwd) === selected);
-}
-
-function getSharedCodexSessionIdForSubmit() {
-  const chats = masterAppState.latestCodex?.recentChats || [];
-  const selectedId = masterAppState.codexSelectedChatId || masterAppState.latestCodex?.currentSessionId || "";
-  if (!selectedId) {
-    return "";
-  }
-
-  const selected = chats.find(item => item.id === selectedId);
-  if (!selected) {
-    return "";
-  }
-
-  return isSharedCodexChat(selected) ? selected.id : "";
-}
-
-function isSharedCodexChat(chat) {
-  return !!chat && (
-    (chat.source || "").toLowerCase() === "codex" ||
-    !!chat.sessionPath
-  );
-}
-
-function normalizePathForCompare(path) {
-  return String(path || "").trim().replace(/\//g, "\\").replace(/\\+$/g, "").toLowerCase();
-}
-
-function formatCodexRecentMeta(item) {
-  const parts = [];
-  if (item?.source) {
-    parts.push(item.source);
-  }
-  if (item?.cwd) {
-    parts.push(trimPath(item.cwd));
-  }
-  parts.push(timeAgo(item?.updatedAtUtc));
-  return parts.filter(Boolean).join(" / ");
-}
-
-function getCodexLatestActivity(active) {
-  const items = getCodexActivityItems(active, null);
-  return items[0]?.detail || items[0]?.title || "";
-}
-
-function getCodexActivityItems(active, pendingApproval) {
-  const items = [];
-  if (pendingApproval) {
-    items.push({
-      title: "Waiting for approval",
-      detail: pendingApproval.summary || pendingApproval.command || "Codex needs your permission to continue."
-    });
-  }
-
-  if (active?.approvalHistory?.length) {
-    active.approvalHistory.slice(-6).reverse().forEach(record => {
-      items.push({
-        title: formatCodexApprovalTitle(record),
-        detail: record.outputSummary || record.summary || record.command || ""
-      });
-    });
-  }
-
-  if (active?.logLines?.length) {
-    active.logLines.slice(-10).reverse().forEach(line => {
-      items.push(formatCodexLogActivity(line));
-    });
-  }
-
-  if (active?.status && !items.length) {
-    items.push({
-      title: formatCodexRunStatus(active.status),
-      detail: active.summary || active.failureMessage || active.taskModeReason || ""
-    });
-  }
-
-  return items.slice(0, 14);
-}
-
-function formatCodexApprovalTitle(record) {
-  const kind = record?.kind ? record.kind.charAt(0).toUpperCase() + record.kind.slice(1) : "Action";
-  const decision = record?.decision ? ` / ${record.decision}` : "";
-  return `${kind}${decision}`;
-}
-
-function formatCodexLogActivity(line) {
-  const text = String(line || "");
-  const match = text.match(/^\[[^\]]+\]\s+\[([^\]]+)\]\s+(.*)$/);
-  if (!match) {
-    return { title: "Log", detail: text };
-  }
-
-  return {
-    title: match[1].charAt(0).toUpperCase() + match[1].slice(1),
-    detail: match[2]
-  };
-}
-
-function formatCodexRunStatus(status) {
-  switch ((status || "").toLowerCase()) {
-    case "queued":
-      return "Queued";
-    case "processing":
-      return "Thinking through next step";
-    case "running-command":
-      return "Running command";
-    case "waiting-approval":
-      return "Waiting for approval";
-    case "completed":
-      return "Completed";
-    case "failed":
-      return "Failed";
-    case "stopped":
-      return "Stopped";
-    default:
-      return status || "Idle";
-  }
-}
-
-function getCodexConnectionLabel() {
-  if (masterAppState.codexConnectionState === "open") {
-    return "Live";
-  }
-  if (masterAppState.codexConnectionState === "error") {
-    return "Offline";
-  }
-  return "Connecting";
 }
 
 function getRecentActivities() {
@@ -1640,16 +901,6 @@ function getStoreSubtitle(app) {
   return app.runState?.isRunning ? "Open the live app." : "Launch through MasterApp.";
 }
 
-function getDefaultCodexModes() {
-  return [
-    { slug: "auto", displayName: "Auto" },
-    { slug: "action", displayName: "Action" },
-    { slug: "investigate", displayName: "Investigate" },
-    { slug: "code", displayName: "Code" },
-    { slug: "ask", displayName: "Ask" }
-  ];
-}
-
 async function getJson(url) {
   const response = await fetch(url, { cache: "no-store" });
   if (!response.ok) {
@@ -1696,18 +947,6 @@ async function refreshApps() {
   }
 }
 
-async function refreshCodex() {
-  try {
-    const codex = await getJson("/api/codex");
-    if (setLatestCodex(codex)) {
-      renderCodexUi();
-    }
-  } catch (error) {
-    masterAppState.codexLastError = error.message;
-    renderCodexUi();
-  }
-}
-
 async function loadLog(name) {
   try {
     const data = await getJson(`/api/logs/${name}?lines=200`);
@@ -1728,19 +967,21 @@ function openPublic() {
   }
 }
 
+function openPhoneQr() {
+  window.open("/api/phone-qr.svg", "_blank", "noopener,noreferrer");
+}
+
 async function refreshAll() {
   try {
-    const [status, apps, codex] = await Promise.all([
+    const [status, apps] = await Promise.all([
       getJson("/api/status"),
-      getJson("/api/apps"),
-      getJson("/api/codex").catch(() => masterAppState.latestCodex || null)
+      getJson("/api/apps")
     ]);
 
     const statusChanged = setLatestStatus(status);
     const appsChanged = setLatestApps(normalizeApps(apps));
-    const codexChanged = codex ? setLatestCodex(codex) : false;
-    if (statusChanged || appsChanged || codexChanged) {
-      codexChanged && !statusChanged && !appsChanged ? renderCodexUi() : renderAppShell();
+    if (statusChanged || appsChanged) {
+      renderAppShell();
     }
   } catch (error) {
     masterAppState.latestStatus = {
@@ -1754,161 +995,6 @@ async function refreshAll() {
     masterAppState.latestStatusKey = serializeValue(masterAppState.latestStatus);
     masterAppState.latestLogText = error.message;
     renderAppShell();
-  }
-}
-
-async function submitCodexPrompt() {
-  const prompt = masterAppState.codexDraft.trim();
-  if (!prompt) {
-    masterAppState.codexLastError = "Enter a prompt first.";
-    renderCodexUi();
-    return;
-  }
-
-  const sessionId = getSharedCodexSessionIdForSubmit();
-  const workspacePath = masterAppState.codexSelectedWorkspace || masterAppState.latestCodex?.configuredWorkspaces?.[0]?.path || "";
-  const model = masterAppState.codexSelectedModel || masterAppState.latestCodex?.currentModel || "";
-  const provider = masterAppState.codexSelectedProvider || masterAppState.latestCodex?.currentProvider || "codex";
-  const mode = masterAppState.codexSelectedMode || "auto";
-  const optimisticRun = {
-    id: `pending-${Date.now()}`,
-    sharedSessionId: sessionId,
-    prompt,
-    provider,
-    requestedMode: mode,
-    taskMode: mode === "auto" ? "" : mode,
-    taskModeSource: mode === "auto" ? "auto" : "manual",
-    taskModeConfidence: mode === "auto" ? 0 : 1,
-    workspacePath,
-    model,
-    status: "processing",
-    responseText: "",
-    changedFiles: [],
-    approvalHistory: [],
-    buildResult: null,
-    restartStatus: null,
-    logLines: [],
-    startedAtUtc: new Date().toISOString()
-  };
-
-  try {
-    masterAppState.codexLastError = "";
-    masterAppState.codexStickToBottom = true;
-    setLatestCodex({
-      ...(masterAppState.latestCodex || {}),
-      activeRun: optimisticRun,
-      pendingApproval: null
-    });
-    renderCodexUi();
-
-    const result = await postJson("/api/codex/messages", {
-      prompt,
-      sessionId,
-      workspacePath,
-      provider,
-      model,
-      mode
-    });
-    if (result?.run) {
-      setLatestCodex({
-        ...(masterAppState.latestCodex || {}),
-        activeRun: result.run,
-        pendingApproval: null
-      });
-    }
-    masterAppState.codexDraft = "";
-    renderCodexUi();
-    void refreshCodex();
-  } catch (error) {
-    masterAppState.codexLastError = error.message;
-    setLatestCodex({
-      ...(masterAppState.latestCodex || {}),
-      activeRun: {
-        ...optimisticRun,
-        status: "failed",
-        failureMessage: error.message
-      }
-    });
-    renderCodexUi();
-  }
-}
-
-async function updateCodexModel(model) {
-  const parsed = parseCodexModelValue(model);
-  if (!parsed.slug) {
-    return;
-  }
-
-  try {
-    masterAppState.codexLastError = "";
-    masterAppState.codexSelectedProvider = parsed.provider;
-    masterAppState.codexSelectedModel = parsed.slug;
-    await postJson("/api/codex/model", { provider: parsed.provider, model: parsed.slug });
-    await refreshCodex();
-  } catch (error) {
-    masterAppState.codexLastError = error.message;
-    renderCodexUi();
-  }
-}
-
-async function resolveCodexApproval(decision) {
-  const approval = masterAppState.latestCodex?.pendingApproval;
-  if (!approval) {
-    return;
-  }
-
-  try {
-    masterAppState.codexLastError = "";
-    await postJson("/api/codex/approval", {
-      runId: approval.runId,
-      approvalId: approval.id,
-      decision
-    });
-    await refreshCodex();
-  } catch (error) {
-    masterAppState.codexLastError = error.message;
-    renderCodexUi();
-  }
-}
-
-async function stopCodexSession() {
-  const active = masterAppState.latestCodex?.activeRun;
-  if (!active || isCodexRunTerminal(active.status)) {
-    return;
-  }
-
-  try {
-    masterAppState.codexLastError = "";
-    await postJson("/api/codex/stop", { runId: active.id });
-    await refreshCodex();
-  } catch (error) {
-    masterAppState.codexLastError = error.message;
-    renderCodexUi();
-  }
-}
-
-async function startNewCodexSession() {
-  const active = masterAppState.latestCodex?.activeRun;
-
-  try {
-    masterAppState.codexLastError = "";
-    await postJson("/api/codex/session/new", { runId: active?.id || "" });
-    masterAppState.codexDraft = "";
-    masterAppState.codexSelectedChatId = "";
-    masterAppState.codexRecentsOpen = false;
-    masterAppState.codexScrollTop = 0;
-    masterAppState.codexStickToBottom = true;
-    setLatestCodex({
-      ...(masterAppState.latestCodex || {}),
-      currentSessionId: "",
-      activeRun: null,
-      pendingApproval: null
-    });
-    renderCodexUi();
-    await refreshCodex();
-  } catch (error) {
-    masterAppState.codexLastError = error.message;
-    renderCodexUi();
   }
 }
 
@@ -1956,125 +1042,8 @@ function setLatestLog(name, text) {
   return true;
 }
 
-function setLatestCodex(codex) {
-  const normalized = normalizeCodex(codex);
-  const key = serializeValue(normalized);
-  if (key === masterAppState.latestCodexKey) {
-    masterAppState.latestCodex = normalized;
-    if (!masterAppState.codexSelectedWorkspace && normalized.configuredWorkspaces?.length) {
-      masterAppState.codexSelectedWorkspace = normalized.configuredWorkspaces[0].path;
-    }
-    if (!masterAppState.codexSelectedModel && normalized.currentModel) {
-      masterAppState.codexSelectedModel = normalized.currentModel;
-    }
-    if (!masterAppState.codexSelectedProvider && normalized.currentProvider) {
-      masterAppState.codexSelectedProvider = normalized.currentProvider;
-    }
-    if (masterAppState.codexSelectedChatId && normalized.recentChats?.length && !normalized.recentChats.some(item => item.id === masterAppState.codexSelectedChatId)) {
-      masterAppState.codexSelectedChatId = "";
-    }
-    if (!masterAppState.codexSelectedChatId && normalized.currentSessionId && normalized.recentChats?.some(item => item.id === normalized.currentSessionId)) {
-      masterAppState.codexSelectedChatId = normalized.currentSessionId;
-    }
-    return false;
-  }
-
-  masterAppState.latestCodex = normalized;
-  masterAppState.latestCodexKey = key;
-  if (!masterAppState.codexSelectedWorkspace && normalized.configuredWorkspaces?.length) {
-    masterAppState.codexSelectedWorkspace = normalized.configuredWorkspaces[0].path;
-  }
-  if (!masterAppState.codexSelectedModel && normalized.currentModel) {
-    masterAppState.codexSelectedModel = normalized.currentModel;
-  }
-  if (!masterAppState.codexSelectedProvider && normalized.currentProvider) {
-    masterAppState.codexSelectedProvider = normalized.currentProvider;
-  }
-  if (masterAppState.codexSelectedChatId && normalized.recentChats?.length && !normalized.recentChats.some(item => item.id === masterAppState.codexSelectedChatId)) {
-    masterAppState.codexSelectedChatId = "";
-  }
-  if (!masterAppState.codexSelectedChatId && normalized.currentSessionId && normalized.recentChats?.some(item => item.id === normalized.currentSessionId)) {
-    masterAppState.codexSelectedChatId = normalized.currentSessionId;
-  }
-  return true;
-}
-
-function normalizeCodex(codex) {
-  return {
-    ...(codex || {}),
-    availableModes: codex?.availableModes || getDefaultCodexModes(),
-    configuredWorkspaces: codex?.configuredWorkspaces || [],
-    availableModels: codex?.availableModels || [],
-    recentChats: codex?.recentChats || [],
-    currentSessionId: codex?.currentSessionId || "",
-    activeRun: codex?.activeRun || null,
-    pendingApproval: codex?.pendingApproval || null,
-    currentProvider: codex?.currentProvider || "codex",
-    currentModel: codex?.currentModel || "",
-    usage: codex?.usage || null,
-    autoApproveReadOnlyCommands: !!codex?.autoApproveReadOnlyCommands,
-    cliProbe: codex?.cliProbe || null,
-    lastRelaunch: codex?.lastRelaunch || null
-  };
-}
-
-function isCodexRunTerminal(status) {
-  return ["completed", "failed", "restart-scheduled", "stopped"].includes((status || "").toLowerCase());
-}
-
-function connectCodexEvents() {
-  if (masterAppState.codexEventSource) {
-    return;
-  }
-
-  const source = new EventSource("/api/codex/events");
-  masterAppState.codexEventSource = source;
-
-  source.onopen = () => {
-    masterAppState.codexConnectionState = "open";
-    renderCodexUi();
-  };
-
-  source.onerror = () => {
-    masterAppState.codexConnectionState = "error";
-    renderCodexUi();
-  };
-
-  source.onmessage = event => {
-    try {
-      const message = JSON.parse(event.data);
-      applyCodexEvent(message);
-    } catch (error) {
-      masterAppState.codexLastError = error.message;
-      renderCodexUi();
-    }
-  };
-}
-
-function applyCodexEvent(message) {
-  const { type, payload } = message || {};
-  if (type === "codex.snapshot") {
-    if (setLatestCodex(payload)) {
-      renderCodexUi();
-    }
-    return;
-  }
-}
-
 function serializeValue(value) {
   return JSON.stringify(value ?? null);
-}
-
-function encodeCodexModelValue(provider, slug) {
-  return `${provider || "codex"}::${slug || ""}`;
-}
-
-function parseCodexModelValue(value) {
-  const [provider, ...rest] = String(value || "").split("::");
-  return {
-    provider: provider || "codex",
-    slug: rest.join("::")
-  };
 }
 
 function getRenderableStatus(status) {
@@ -2083,9 +1052,21 @@ function getRenderableStatus(status) {
   }
 
   return {
+    runtimeMode: status.runtimeMode,
     localUrl: status.localUrl,
+    loopbackUrl: status.loopbackUrl,
+    lanUrl: status.lanUrl,
     publicUrl: status.publicUrl,
     publicHostname: status.publicHostname,
+    activeLocalPort: status.activeLocalPort,
+    wifiAvailable: status.wifiAvailable,
+    wifiOnly: status.wifiOnly,
+    wifiInterface: status.wifiInterface,
+    wifiAddress: status.wifiAddress,
+    wifiNetwork: status.wifiNetwork,
+    remoteSessionRequired: status.remoteSessionRequired,
+    activeRemoteSessions: status.activeRemoteSessions,
+    pendingQrTickets: status.pendingQrTickets,
     tokenPresent: status.tokenPresent,
     configIssues: status.configIssues,
     tunnel: status.tunnel ? {
@@ -2113,78 +1094,6 @@ function getRenderableStatus(status) {
       message: status.lastPublishResult.message
     } : null
   };
-}
-
-function getCodexUsageRows(usage) {
-  if (!usage) {
-    return [{ label: "Usage", value: "Loading..." }];
-  }
-
-  const rows = [
-    { label: "Provider", value: usage.provider || "-" },
-    { label: "Model", value: usage.model || "-" }
-  ];
-
-  (usage.items || []).forEach(item => {
-    rows.push({
-      label: item.label || "Usage",
-      value: item.display || "-"
-    });
-  });
-
-  return rows;
-}
-
-function captureCodexScrollState(container) {
-  if (!(container instanceof HTMLElement)) {
-    return {
-      top: masterAppState.codexScrollTop,
-      stickToBottom: masterAppState.codexStickToBottom
-    };
-  }
-
-  const maxScrollTop = Math.max(0, container.scrollHeight - container.clientHeight);
-  const top = Math.max(0, Math.min(container.scrollTop, maxScrollTop));
-  const distanceFromBottom = Math.max(0, container.scrollHeight - container.clientHeight - top);
-  const stickToBottom = distanceFromBottom <= 48;
-
-  masterAppState.codexScrollTop = top;
-  masterAppState.codexStickToBottom = stickToBottom;
-
-  return {
-    top,
-    stickToBottom
-  };
-}
-
-function restoreCodexScrollState(state) {
-  const container = document.querySelector(".codex-chat-scroll");
-  if (!(container instanceof HTMLElement)) {
-    return;
-  }
-
-  const shouldStick = !!state?.stickToBottom;
-  if (shouldStick) {
-    container.scrollTop = Math.max(0, container.scrollHeight - container.clientHeight);
-    masterAppState.codexScrollTop = container.scrollTop;
-    masterAppState.codexStickToBottom = true;
-    return;
-  }
-
-  const maxScrollTop = Math.max(0, container.scrollHeight - container.clientHeight);
-  container.scrollTop = Math.max(0, Math.min(state?.top ?? 0, maxScrollTop));
-  masterAppState.codexScrollTop = container.scrollTop;
-}
-
-function bindCodexScrollTracking() {
-  const container = document.querySelector(".codex-chat-scroll");
-  if (!(container instanceof HTMLElement)) {
-    return;
-  }
-
-  container.addEventListener("scroll", () => {
-    captureCodexScrollState(container);
-  }, { passive: true });
 }
 
 function initZoomLock() {
@@ -2378,8 +1287,8 @@ function escapeAttribute(value) {
 
 window.postAction = postAction;
 window.refreshAll = refreshAll;
-window.refreshCodex = refreshCodex;
 window.openPublic = openPublic;
+window.openPhoneQr = openPhoneQr;
 window.loadLog = loadLog;
 window.exportApp = exportApp;
 window.deleteApp = deleteApp;

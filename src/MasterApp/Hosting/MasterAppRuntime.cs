@@ -1,8 +1,11 @@
+using MasterApp.Access;
 using MasterApp.Bootstrap;
 using MasterApp.Diagnostics;
 using MasterApp.LifeJournal;
 using MasterApp.Models;
+using MasterApp.Networking;
 using MasterApp.Packages;
+using MasterApp.Storage;
 using MasterApp.Tunnel;
 using MasterApp.Utilities;
 using MasterApp.Web;
@@ -14,10 +17,11 @@ using Microsoft.AspNetCore.StaticFiles;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Primitives;
-using MasterApp.Storage;
 using System.Diagnostics;
+using System.Net.NetworkInformation;
 using System.Net.Http;
 using System.Net.Http.Headers;
+using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
 
@@ -32,7 +36,8 @@ public sealed class MasterAppRuntime : IDisposable
     private readonly AppProcessManager _appProcessManager;
     private readonly TunnelManager _tunnelManager;
     private readonly WatchdogStateStore _watchdogStateStore;
-    private readonly CodexBrokerService _codexService;
+    private readonly WifiNetworkInspector _wifiNetworkInspector;
+    private readonly RemoteAccessSessionManager _remoteAccessSessionManager;
     private readonly LifeJournalService _lifeJournal;
     private readonly LifeJournalFinalizer _lifeJournalFinalizer;
     private readonly HttpClient _proxyClient;
@@ -51,7 +56,8 @@ public sealed class MasterAppRuntime : IDisposable
         _watchdogStateStore = new WatchdogStateStore(_context.Paths, _context.Log);
         _appProcessManager = new AppProcessManager(_context);
         _tunnelManager = new TunnelManager(_context);
-        _codexService = new CodexBrokerService(_context, this);
+        _wifiNetworkInspector = new WifiNetworkInspector();
+        _remoteAccessSessionManager = new RemoteAccessSessionManager(_context.Settings.SessionQrTtlSeconds);
         _lifeJournal = new LifeJournalService(_context);
         _lifeJournalFinalizer = new LifeJournalFinalizer(
             _lifeJournal.Store,
@@ -62,7 +68,10 @@ public sealed class MasterAppRuntime : IDisposable
         _proxyClient = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false }, disposeHandler: true);
     }
 
-    public string LocalUrl => $"http://localhost:{_context.Secrets.LocalPort}";
+    public bool IsLazyLocalMode => string.Equals(_context.Settings.RuntimeMode, "lazy-local", StringComparison.OrdinalIgnoreCase);
+    public int ActiveLocalPort { get; private set; } = 19057;
+    public string LoopbackUrl => $"http://127.0.0.1:{ActiveLocalPort}";
+    public string LocalUrl => IsLazyLocalMode ? LoopbackUrl : $"http://localhost:{_context.Secrets.LocalPort}";
     public string PublicUrl => $"https://{_context.Secrets.PublicHostname}";
     public string LogsDirectory => _context.Paths.LogsDirectory;
 
@@ -76,6 +85,10 @@ public sealed class MasterAppRuntime : IDisposable
             }
 
             _context.Log.Info("Runtime", "Starting local web host.");
+            ActiveLocalPort = IsLazyLocalMode
+                ? LocalPortSelector.SelectAvailablePort(_context.Settings.PreferredLocalPort, _context.Settings.LocalPortFallbackCount)
+                : _context.Secrets.LocalPort;
+            _context.RuntimeStateStore.SetActiveLocalPort(ActiveLocalPort);
             _webApp = BuildWebApplication();
             _webApp.StartAsync().GetAwaiter().GetResult();
             _context.Log.Info("Runtime", $"Local web host started on {LocalUrl}");
@@ -162,17 +175,6 @@ public sealed class MasterAppRuntime : IDisposable
     public OperationResult StopTunnel() => _tunnelManager.Stop();
     public OperationResult RestartTunnel() => _tunnelManager.Restart();
     public Task<OperationResult> RescanPackagesAsync() => _packageWatcher.ScanNowAsync("manual");
-    public object GetCodexResponse() => _codexService.GetDashboardResponse();
-    public Task<CodexChatRun> StartCodexRunAsync(CodexBrokerService.CodexChatRequest request, CancellationToken cancellationToken = default)
-        => _codexService.StartRunAsync(request, cancellationToken);
-    public Task<CodexChatRun> StopCodexRunAsync(CodexBrokerService.CodexStopRequest request, CancellationToken cancellationToken = default)
-        => _codexService.StopRunAsync(request, cancellationToken);
-    public Task ClearCodexSessionAsync(CodexBrokerService.CodexNewSessionRequest request, CancellationToken cancellationToken = default)
-        => _codexService.ClearSessionAsync(request, cancellationToken);
-    public Task SetCodexModelAsync(CodexBrokerService.CodexModelRequest request, CancellationToken cancellationToken = default)
-        => _codexService.SetModelAsync(request, cancellationToken);
-    public Task<CodexChatRun> ResolveCodexApprovalAsync(CodexBrokerService.CodexApprovalDecisionRequest request, CancellationToken cancellationToken = default)
-        => _codexService.ResolveApprovalAsync(request, cancellationToken);
     public async Task<OperationResult> StartAppAsync(string appId)
     {
         try
@@ -353,20 +355,94 @@ public sealed class MasterAppRuntime : IDisposable
     public void OpenLogsFolder() => ShellHelper.OpenPath(_context.Paths.LogsDirectory);
     public void MarkExplicitQuit() => _watchdogStateStore.MarkExplicitQuit();
 
+    public WifiNetworkSnapshot GetWifiSnapshot() => _wifiNetworkInspector.GetSnapshot();
+
+    public bool IsLoopbackRequest(HttpContext context)
+    {
+        var remoteAddress = WifiNetworkInspector.NormalizeAddress(context.Connection.RemoteIpAddress);
+        if (remoteAddress is null)
+        {
+            return true;
+        }
+
+        return RemoteAccessPolicy.IsLoopbackOrLocalMachine(remoteAddress, GetMachineIpv4Addresses());
+    }
+
+    public bool IsRemoteClientAllowed(HttpContext context, out string reason)
+    {
+        var remoteAddress = WifiNetworkInspector.NormalizeAddress(context.Connection.RemoteIpAddress);
+        if (remoteAddress is null)
+        {
+            reason = "MasterApp could not determine the remote client IP address.";
+            return false;
+        }
+
+        if (!_context.Settings.WifiOnly)
+        {
+            reason = string.Empty;
+            return true;
+        }
+
+        var wifiSnapshot = GetWifiSnapshot();
+        if (!wifiSnapshot.IsAvailable ||
+            string.IsNullOrWhiteSpace(wifiSnapshot.HostAddress) ||
+            string.IsNullOrWhiteSpace(wifiSnapshot.SubnetMask))
+        {
+            reason = "MasterApp remote access is available only when this PC is connected to Wi-Fi.";
+            return false;
+        }
+
+        if (!RemoteAccessPolicy.IsAllowedWifiClient(remoteAddress, wifiSnapshot.HostAddress, wifiSnapshot.SubnetMask))
+        {
+            reason = "MasterApp only accepts remote connections from the same Wi-Fi network.";
+            return false;
+        }
+
+        reason = string.Empty;
+        return true;
+    }
+
+    public bool IsAnonymousRemotePath(PathString path)
+    {
+        var value = path.Value ?? string.Empty;
+        return value.StartsWith("/phone/connect", StringComparison.OrdinalIgnoreCase) ||
+               value.StartsWith("/phone/scan", StringComparison.OrdinalIgnoreCase);
+    }
+
+    public bool HasRemoteAccessSession(HttpContext context)
+    {
+        return context.Request.Cookies.TryGetValue(RemoteAccessSessionManager.SessionCookieName, out var sessionId) &&
+               _remoteAccessSessionManager.HasValidSession(sessionId, context.Connection.RemoteIpAddress);
+    }
+
     public object GetStatusResponse()
     {
         var runtimeState = _context.RuntimeStateStore.Snapshot();
+        var wifiSnapshot = GetWifiSnapshot();
+        var remoteAccessSnapshot = _remoteAccessSessionManager.Snapshot();
         return new
         {
             appName = "MasterApp",
+            runtimeMode = _context.Settings.RuntimeMode,
             localUrl = LocalUrl,
+            loopbackUrl = LoopbackUrl,
+            lanUrl = IsLazyLocalMode ? BuildLanUrl(wifiSnapshot) : null,
             publicUrl = PublicUrl,
             publicHostname = _context.Secrets.PublicHostname,
-            localPort = _context.Secrets.LocalPort,
+            localPort = ActiveLocalPort,
+            activeLocalPort = ActiveLocalPort,
             settingsFile = _context.Paths.SettingsFile,
             secretsFile = _context.Paths.SecretsFile,
             logsDirectory = _context.Paths.LogsDirectory,
             publishedDirectory = _context.Settings.PublishedFolder,
+            wifiAvailable = wifiSnapshot.IsAvailable,
+            wifiOnly = IsLazyLocalMode && _context.Settings.WifiOnly,
+            wifiInterface = wifiSnapshot.InterfaceName,
+            wifiAddress = wifiSnapshot.HostAddress,
+            wifiNetwork = wifiSnapshot.NetworkPrefix,
+            remoteSessionRequired = IsLazyLocalMode,
+            activeRemoteSessions = IsLazyLocalMode ? remoteAccessSnapshot.ActiveSessions : 0,
+            pendingQrTickets = IsLazyLocalMode ? remoteAccessSnapshot.PendingTickets : 0,
             tokenPresent = !string.IsNullOrWhiteSpace(_context.Secrets.CloudflareTunnelToken) &&
                            !_context.Secrets.CloudflareTunnelToken.Contains("PASTE_TOKEN_HERE", StringComparison.OrdinalIgnoreCase),
             tunnel = _tunnelManager.Snapshot(),
@@ -390,12 +466,13 @@ public sealed class MasterAppRuntime : IDisposable
             publishedFolder = _context.Settings.PublishedFolder,
             autoStartTunnel = _context.Settings.AutoStartTunnel,
             logLevel = _context.Settings.LogLevel,
-            codexCommand = _context.Settings.CodexCommand,
-            workspacePaths = _context.Settings.WorkspacePaths,
-            preferredBuildCommand = _context.Settings.PreferredBuildCommand,
-            preferredRestartCommand = _context.Settings.PreferredRestartCommand,
+            runtimeMode = _context.Settings.RuntimeMode,
+            preferredLocalPort = _context.Settings.PreferredLocalPort,
+            localPortFallbackCount = _context.Settings.LocalPortFallbackCount,
+            wifiOnly = _context.Settings.WifiOnly,
+            sessionQrTtlSeconds = _context.Settings.SessionQrTtlSeconds,
             publicHostname = _context.Secrets.PublicHostname,
-            localPort = _context.Secrets.LocalPort,
+            localPort = ActiveLocalPort,
             tokenPresent = !string.IsNullOrWhiteSpace(_context.Secrets.CloudflareTunnelToken) &&
                            !_context.Secrets.CloudflareTunnelToken.Contains("PASTE_TOKEN_HERE", StringComparison.OrdinalIgnoreCase)
         };
@@ -433,7 +510,6 @@ public sealed class MasterAppRuntime : IDisposable
             "tunnel" => LogKind.Tunnel,
             "packages" => LogKind.Packages,
             "ui" => LogKind.Ui,
-            "codex" => LogKind.Codex,
             _ => LogKind.App
         };
 
@@ -530,7 +606,14 @@ public sealed class MasterAppRuntime : IDisposable
         try
         {
             await _appProcessManager.EnsureRunningAsync(appId, context.RequestAborted);
-            await ProxyToAppAsync(context, app, relativePath);
+            if (context.WebSockets.IsWebSocketRequest)
+            {
+                await ProxyWebSocketToAppAsync(context, app, relativePath);
+            }
+            else
+            {
+                await ProxyToAppAsync(context, app, relativePath);
+            }
             return true;
         }
         catch (Exception ex)
@@ -552,7 +635,7 @@ public sealed class MasterAppRuntime : IDisposable
         };
 
         var builder = WebApplication.CreateBuilder(options);
-        builder.WebHost.UseUrls(LocalUrl);
+        builder.WebHost.UseUrls(IsLazyLocalMode ? $"http://0.0.0.0:{ActiveLocalPort}" : LocalUrl);
 
         builder.Services.Configure<Microsoft.AspNetCore.Http.Json.JsonOptions>(options =>
         {
@@ -563,6 +646,16 @@ public sealed class MasterAppRuntime : IDisposable
         builder.Services.AddSingleton(this);
 
         var app = builder.Build();
+
+        app.UseWebSockets(new WebSocketOptions
+        {
+            KeepAliveInterval = TimeSpan.FromSeconds(20)
+        });
+
+        if (IsLazyLocalMode)
+        {
+            app.UseMiddleware<RemoteAccessMiddleware>();
+        }
 
         app.UseMiddleware<HostedAppMiddleware>();
         app.UseMiddleware<InstalledAppMiddleware>();
@@ -588,6 +681,40 @@ public sealed class MasterAppRuntime : IDisposable
         {
             _context.Log.Ui("Api", "GET /healthz");
             return Results.Ok(new { status = "ok", utc = DateTimeOffset.UtcNow });
+        });
+
+        app.MapGet("/phone/scan", () =>
+        {
+            _context.Log.Ui("Api", "GET /phone/scan");
+            return Results.Content(BuildPhoneScanPage(), "text/html; charset=utf-8");
+        });
+
+        app.MapGet("/phone/connect", (HttpContext context, string? ticket) =>
+        {
+            _context.Log.Ui("Api", "GET /phone/connect");
+            if (!IsLazyLocalMode ||
+                string.IsNullOrWhiteSpace(ticket) ||
+                !_remoteAccessSessionManager.TryConsumeTicket(ticket, context.Connection.RemoteIpAddress, out var result) ||
+                result is null)
+            {
+                return Results.Content(
+                    BuildPhoneErrorPage("QR code expired", "Scan the latest QR code from the PC again."),
+                    "text/html; charset=utf-8");
+            }
+
+            context.Response.Cookies.Append(
+                RemoteAccessSessionManager.SessionCookieName,
+                result.SessionId,
+                new CookieOptions
+                {
+                    HttpOnly = true,
+                    IsEssential = true,
+                    SameSite = SameSiteMode.Lax,
+                    Secure = false,
+                    Path = "/"
+                });
+
+            return Results.Redirect(result.RedirectPath);
         });
 
         app.MapGet("/api/status", () =>
@@ -636,93 +763,6 @@ public sealed class MasterAppRuntime : IDisposable
         {
             _context.Log.Ui("Api", $"GET /api/logs/{name}?lines={lines}");
             return Results.Json(GetLogsResponse(name, lines ?? 200));
-        });
-
-        app.MapGet("/api/codex", () =>
-        {
-            _context.Log.Ui("Api", "GET /api/codex");
-            return Results.Json(GetCodexResponse());
-        });
-
-        app.MapGet("/api/codex/events", async (HttpContext context) =>
-        {
-            _context.Log.Ui("Api", "GET /api/codex/events");
-            await WriteCodexEventsAsync(context);
-        });
-
-        app.MapPost("/api/codex/messages", async (CodexBrokerService.CodexChatRequest request, HttpContext context) =>
-        {
-            _context.Log.Ui("Api", "POST /api/codex/messages");
-            if (string.IsNullOrWhiteSpace(request.Prompt))
-            {
-                return Results.BadRequest(new { ok = false, message = "Prompt is required." });
-            }
-
-            try
-            {
-                var run = await StartCodexRunAsync(request, context.RequestAborted);
-                return Results.Json(new { ok = true, run });
-            }
-            catch (Exception ex)
-            {
-                return Results.BadRequest(new { ok = false, message = ex.Message });
-            }
-        });
-
-        app.MapPost("/api/codex/model", async (CodexBrokerService.CodexModelRequest request, HttpContext context) =>
-        {
-            _context.Log.Ui("Api", "POST /api/codex/model");
-            try
-            {
-                await SetCodexModelAsync(request, context.RequestAborted);
-                return Results.Json(new { ok = true });
-            }
-            catch (Exception ex)
-            {
-                return Results.BadRequest(new { ok = false, message = ex.Message });
-            }
-        });
-
-        app.MapPost("/api/codex/stop", async (CodexBrokerService.CodexStopRequest request, HttpContext context) =>
-        {
-            _context.Log.Ui("Api", "POST /api/codex/stop");
-            try
-            {
-                var run = await StopCodexRunAsync(request, context.RequestAborted);
-                return Results.Json(new { ok = true, run });
-            }
-            catch (Exception ex)
-            {
-                return Results.BadRequest(new { ok = false, message = ex.Message });
-            }
-        });
-
-        app.MapPost("/api/codex/session/new", async (CodexBrokerService.CodexNewSessionRequest request, HttpContext context) =>
-        {
-            _context.Log.Ui("Api", "POST /api/codex/session/new");
-            try
-            {
-                await ClearCodexSessionAsync(request, context.RequestAborted);
-                return Results.Json(new { ok = true });
-            }
-            catch (Exception ex)
-            {
-                return Results.BadRequest(new { ok = false, message = ex.Message });
-            }
-        });
-
-        app.MapPost("/api/codex/approval", async (CodexBrokerService.CodexApprovalDecisionRequest request, HttpContext context) =>
-        {
-            _context.Log.Ui("Api", "POST /api/codex/approval");
-            try
-            {
-                var run = await ResolveCodexApprovalAsync(request, context.RequestAborted);
-                return Results.Json(new { ok = true, run });
-            }
-            catch (Exception ex)
-            {
-                return Results.BadRequest(new { ok = false, message = ex.Message });
-            }
         });
 
         app.MapGet("/life", () =>
@@ -866,27 +906,30 @@ public sealed class MasterAppRuntime : IDisposable
         app.MapGet("/api/phone-qr.svg", () =>
         {
             _context.Log.Ui("Api", "GET /api/phone-qr.svg");
-            var svg = QrCodeHelper.GenerateSvg(PublicUrl);
+            var svg = GeneratePhoneQrSvg();
             return Results.Content(svg, "image/svg+xml");
         });
 
-        app.MapPost("/api/tunnel/start", () =>
+        if (!IsLazyLocalMode)
         {
-            _context.Log.Ui("Api", "POST /api/tunnel/start");
-            return Results.Json(StartTunnel());
-        });
+            app.MapPost("/api/tunnel/start", () =>
+            {
+                _context.Log.Ui("Api", "POST /api/tunnel/start");
+                return Results.Json(StartTunnel());
+            });
 
-        app.MapPost("/api/tunnel/stop", () =>
-        {
-            _context.Log.Ui("Api", "POST /api/tunnel/stop");
-            return Results.Json(StopTunnel());
-        });
+            app.MapPost("/api/tunnel/stop", () =>
+            {
+                _context.Log.Ui("Api", "POST /api/tunnel/stop");
+                return Results.Json(StopTunnel());
+            });
 
-        app.MapPost("/api/tunnel/restart", () =>
-        {
-            _context.Log.Ui("Api", "POST /api/tunnel/restart");
-            return Results.Json(RestartTunnel());
-        });
+            app.MapPost("/api/tunnel/restart", () =>
+            {
+                _context.Log.Ui("Api", "POST /api/tunnel/restart");
+                return Results.Json(RestartTunnel());
+            });
+        }
 
         app.MapPost("/api/packages/rescan", async () =>
         {
@@ -895,6 +938,104 @@ public sealed class MasterAppRuntime : IDisposable
         });
 
         return app;
+    }
+
+    private string GeneratePhoneQrSvg()
+    {
+        if (!IsLazyLocalMode)
+        {
+            return QrCodeHelper.GenerateSvg(PublicUrl);
+        }
+
+        var lanUrl = BuildLanUrl(GetWifiSnapshot());
+        if (string.IsNullOrWhiteSpace(lanUrl))
+        {
+            return QrCodeHelper.GenerateMessageSvg("Wi-Fi unavailable", "Connect this PC to Wi-Fi first.");
+        }
+
+        var ticket = _remoteAccessSessionManager.CreateTicket();
+        var connectUrl = $"{lanUrl.TrimEnd('/')}/phone/connect?ticket={Uri.EscapeDataString(ticket.Ticket)}";
+        return QrCodeHelper.GenerateSvg(connectUrl);
+    }
+
+    private IReadOnlyList<string> GetMachineIpv4Addresses()
+    {
+        return NetworkInterface.GetAllNetworkInterfaces()
+            .SelectMany(candidate =>
+            {
+                try
+                {
+                    return candidate.GetIPProperties().UnicastAddresses.Cast<UnicastIPAddressInformation>();
+                }
+                catch
+                {
+                    return Array.Empty<UnicastIPAddressInformation>();
+                }
+            })
+            .Select(candidate => WifiNetworkInspector.NormalizeAddress(candidate.Address)?.ToString())
+            .Where(candidate => !string.IsNullOrWhiteSpace(candidate))
+            .Cast<string>()
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+    }
+
+    private string? BuildLanUrl(WifiNetworkSnapshot snapshot)
+    {
+        return snapshot.IsAvailable && !string.IsNullOrWhiteSpace(snapshot.HostAddress)
+            ? $"http://{snapshot.HostAddress}:{ActiveLocalPort}"
+            : null;
+    }
+
+    private static string BuildPhoneScanPage()
+    {
+        return """
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MasterApp Phone Access</title>
+  <style>
+    body { margin: 0; font-family: Segoe UI, Arial, sans-serif; background: #f6f8fb; color: #111723; display: grid; min-height: 100vh; place-items: center; }
+    main { max-width: 420px; padding: 28px; text-align: center; }
+    h1 { margin: 0 0 12px; font-size: 28px; }
+    p { margin: 0; color: #5d6b80; line-height: 1.5; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Scan the QR from the PC</h1>
+    <p>This phone needs a current QR session before opening MasterApp.</p>
+  </main>
+</body>
+</html>
+""";
+    }
+
+    private static string BuildPhoneErrorPage(string title, string message)
+    {
+        return $$"""
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{title}}</title>
+  <style>
+    body { margin: 0; font-family: Segoe UI, Arial, sans-serif; background: #fff7f7; color: #231111; display: grid; min-height: 100vh; place-items: center; }
+    main { max-width: 420px; padding: 28px; text-align: center; }
+    h1 { margin: 0 0 12px; font-size: 28px; }
+    p { margin: 0; color: #805d5d; line-height: 1.5; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>{{System.Net.WebUtility.HtmlEncode(title)}}</h1>
+    <p>{{System.Net.WebUtility.HtmlEncode(message)}}</p>
+  </main>
+</body>
+</html>
+""";
     }
 
     private static string ReadLifePage()
@@ -918,80 +1059,6 @@ public sealed class MasterAppRuntime : IDisposable
             {
                 destination.Content.Headers.TryAddWithoutValidation(header.Key, header.Value.ToArray());
             }
-        }
-    }
-
-    public async Task WriteCodexEventsAsync(HttpContext context)
-    {
-        context.Response.Headers.ContentType = "text/event-stream";
-        context.Response.Headers.CacheControl = "no-cache";
-        context.Response.Headers.Connection = "keep-alive";
-
-        using var subscription = _codexService.Subscribe();
-
-        try
-        {
-            while (await subscription.Reader.WaitToReadAsync(context.RequestAborted))
-            {
-                while (subscription.Reader.TryRead(out var ev))
-                {
-                    var json = JsonSerializer.Serialize(ev, MasterApp.Storage.JsonOptions.Default);
-                    await context.Response.WriteAsync($"data: {json}\n\n", context.RequestAborted);
-                    await context.Response.Body.FlushAsync(context.RequestAborted);
-                }
-            }
-        }
-        catch (OperationCanceledException)
-        {
-            // client disconnected
-        }
-    }
-
-    public Task<RelaunchStatusRecord> ScheduleSelfRelaunchAsync(string operationId, string workspacePath, string reason)
-    {
-        try
-        {
-            var backupDirectory = BackupImportantState(operationId, workspacePath);
-            var command = GetRestartCommand(workspacePath);
-            var record = new RelaunchStatusRecord
-            {
-                Status = "scheduled",
-                Message = reason,
-                BackupDirectory = backupDirectory,
-                Command = command,
-                OperationId = operationId,
-                RequestedAtUtc = DateTimeOffset.UtcNow
-            };
-
-            _context.RuntimeStateStore.SetLastRelaunch(record);
-            File.WriteAllText(_context.Paths.RelaunchStateFile, JsonSerializer.Serialize(record, MasterApp.Storage.JsonOptions.DefaultIndented));
-
-            var scriptPath = CreateRelaunchScript(record, workspacePath);
-            StartRelaunchHelper(scriptPath);
-
-            _ = Task.Run(async () =>
-            {
-                await Task.Delay(1200);
-                ExitForRelaunch();
-            });
-
-            _context.Log.Codex("Runtime", $"Scheduled self relaunch with helper script: {scriptPath}");
-            return Task.FromResult(record);
-        }
-        catch (Exception ex)
-        {
-            var failed = new RelaunchStatusRecord
-            {
-                Status = "failed",
-                Message = ex.Message,
-                OperationId = operationId,
-                RequestedAtUtc = DateTimeOffset.UtcNow,
-                CompletedAtUtc = DateTimeOffset.UtcNow
-            };
-
-            _context.RuntimeStateStore.SetLastRelaunch(failed);
-            _context.Log.Codex("Runtime", "Failed to schedule self relaunch.", ex);
-            return Task.FromResult(failed);
         }
     }
 
@@ -1046,6 +1113,74 @@ public sealed class MasterAppRuntime : IDisposable
         }
 
         await responseMessage.Content.CopyToAsync(context.Response.Body, context.RequestAborted);
+    }
+
+    private async Task ProxyWebSocketToAppAsync(HttpContext context, InstalledAppState app, string relativePath)
+    {
+        var refreshedApp = _context.RuntimeStateStore.GetApp(app.Id) ?? app;
+        var baseUrl = new Uri(_appProcessManager.GetTargetBaseUrl(refreshedApp));
+        var targetPath = string.IsNullOrWhiteSpace(relativePath) ? "/" : "/" + relativePath;
+        var targetUri = new UriBuilder(baseUrl)
+        {
+            Scheme = string.Equals(baseUrl.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase) ? "wss" : "ws",
+            Path = targetPath,
+            Query = context.Request.QueryString.HasValue ? context.Request.QueryString.Value![1..] : string.Empty
+        }.Uri;
+
+        using var upstream = new ClientWebSocket();
+        foreach (var protocol in context.WebSockets.WebSocketRequestedProtocols)
+        {
+            upstream.Options.AddSubProtocol(protocol);
+        }
+
+        await upstream.ConnectAsync(targetUri, context.RequestAborted);
+        var acceptedProtocol = string.IsNullOrWhiteSpace(upstream.SubProtocol) ? null : upstream.SubProtocol;
+        using var downstream = await context.WebSockets.AcceptWebSocketAsync(acceptedProtocol);
+        using var relayCancellation = CancellationTokenSource.CreateLinkedTokenSource(context.RequestAborted);
+
+        var downstreamToUpstream = RelayWebSocketAsync(downstream, upstream, relayCancellation.Token);
+        var upstreamToDownstream = RelayWebSocketAsync(upstream, downstream, relayCancellation.Token);
+        await Task.WhenAny(downstreamToUpstream, upstreamToDownstream);
+        relayCancellation.Cancel();
+
+        try
+        {
+            await Task.WhenAll(downstreamToUpstream, upstreamToDownstream);
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        catch (WebSocketException)
+        {
+        }
+    }
+
+    private static async Task RelayWebSocketAsync(WebSocket source, WebSocket destination, CancellationToken cancellationToken)
+    {
+        var buffer = new byte[64 * 1024];
+        while (source.State == WebSocketState.Open &&
+               destination.State == WebSocketState.Open &&
+               !cancellationToken.IsCancellationRequested)
+        {
+            var result = await source.ReceiveAsync(buffer, cancellationToken);
+            if (result.MessageType == WebSocketMessageType.Close)
+            {
+                if (destination.State == WebSocketState.Open)
+                {
+                    await destination.CloseOutputAsync(
+                        result.CloseStatus ?? WebSocketCloseStatus.NormalClosure,
+                        result.CloseStatusDescription,
+                        cancellationToken);
+                }
+                return;
+            }
+
+            await destination.SendAsync(
+                buffer.AsMemory(0, result.Count),
+                result.MessageType,
+                result.EndOfMessage,
+                cancellationToken);
+        }
     }
 
     private static bool ShouldRewriteProxyResponse(string? mediaType)
@@ -1324,166 +1459,6 @@ public sealed class MasterAppRuntime : IDisposable
         var issues = new List<string>(_context.ValidationIssues);
 
         return issues;
-    }
-
-    private string BackupImportantState(string operationId, string workspacePath)
-    {
-        var backupDirectory = Path.Combine(
-            _context.Paths.BackupsDirectory,
-            $"{DateTimeOffset.UtcNow:yyyyMMdd-HHmmss}-{operationId[..Math.Min(8, operationId.Length)]}");
-        Directory.CreateDirectory(backupDirectory);
-
-        CopyFileIfPresent(_context.Paths.SettingsFile, Path.Combine(backupDirectory, "settings.json"));
-        CopyFileIfPresent(_context.Paths.SecretsFile, Path.Combine(backupDirectory, "secrets.json"));
-        CopyFileIfPresent(_context.Paths.RuntimeStateFile, Path.Combine(backupDirectory, "runtime-state.json"));
-
-        var environmentFile = Path.Combine(workspacePath, ".codex", "environments", "environment.toml");
-        if (File.Exists(environmentFile))
-        {
-            var environmentBackup = Path.Combine(backupDirectory, "workspace", ".codex", "environments", "environment.toml");
-            Directory.CreateDirectory(Path.GetDirectoryName(environmentBackup)!);
-            File.Copy(environmentFile, environmentBackup, overwrite: true);
-        }
-
-        CleanupOldBackups();
-        return backupDirectory;
-    }
-
-    private void CleanupOldBackups()
-    {
-        var retention = Math.Max(1, _context.Settings.ConfigBackupRetentionCount);
-        var directories = new DirectoryInfo(_context.Paths.BackupsDirectory)
-            .GetDirectories()
-            .OrderByDescending(directory => directory.CreationTimeUtc)
-            .ToArray();
-
-        foreach (var directory in directories.Skip(retention))
-        {
-            try
-            {
-                directory.Delete(recursive: true);
-            }
-            catch (Exception ex)
-            {
-                _context.Log.Codex("Runtime", $"Backup cleanup warning for {directory.FullName}: {ex.Message}", ex);
-            }
-        }
-    }
-
-    public string GetRestartCommand(string workspacePath)
-    {
-        if (!string.IsNullOrWhiteSpace(_context.Settings.PreferredRestartCommand))
-        {
-            return _context.Settings.PreferredRestartCommand;
-        }
-
-        var script = Path.Combine(workspacePath, "scripts", "run-masterapp.bat");
-        if (File.Exists(script))
-        {
-            return ".\\scripts\\run-masterapp.bat";
-        }
-
-        var executable = Environment.ProcessPath;
-        if (string.IsNullOrWhiteSpace(executable))
-        {
-            throw new InvalidOperationException("Could not determine a restart command for MasterApp.");
-        }
-
-        return $"\"{executable}\"";
-    }
-
-    private string CreateRelaunchScript(RelaunchStatusRecord record, string workspacePath)
-    {
-        var scriptPath = Path.Combine(_context.Paths.TempDirectory, $"masterapp-relaunch-{record.OperationId ?? Guid.NewGuid().ToString("N")}.ps1");
-        var markerPath = _context.Paths.RelaunchStateFile.Replace("'", "''");
-        var workingDirectory = workspacePath.Replace("'", "''");
-        var command = (record.Command ?? string.Empty).Replace("'", "''");
-        var backupDirectory = (record.BackupDirectory ?? string.Empty).Replace("'", "''");
-        var operationId = (record.OperationId ?? string.Empty).Replace("'", "''");
-
-        var script = $$"""
-param()
-$ErrorActionPreference = 'Continue'
-$pidToWait = {{Process.GetCurrentProcess().Id}}
-$deadline = (Get-Date).AddSeconds(45)
-while ((Get-Date) -lt $deadline) {
-  $existing = Get-Process -Id $pidToWait -ErrorAction SilentlyContinue
-  if (-not $existing) { break }
-  Start-Sleep -Milliseconds 750
-}
-if (Get-Process -Id $pidToWait -ErrorAction SilentlyContinue) {
-  Stop-Process -Id $pidToWait -Force -ErrorAction SilentlyContinue
-  Start-Sleep -Seconds 1
-}
-$launching = @{
-  status = 'launching'
-  message = 'Relaunch helper is starting MasterApp.'
-  backupDirectory = '{{backupDirectory}}'
-  command = '{{command}}'
-  operationId = '{{operationId}}'
-  requestedAtUtc = '{{record.RequestedAtUtc:O}}'
-}
-$launching | ConvertTo-Json -Compress | Set-Content -LiteralPath '{{markerPath}}' -Encoding UTF8
-Start-Process -FilePath 'cmd.exe' -ArgumentList '/c', '{{command}}' -WorkingDirectory '{{workingDirectory}}' -WindowStyle Hidden
-$launched = @{
-  status = 'launched'
-  message = 'MasterApp relaunch command started.'
-  backupDirectory = '{{backupDirectory}}'
-  command = '{{command}}'
-  operationId = '{{operationId}}'
-  requestedAtUtc = '{{record.RequestedAtUtc:O}}'
-  completedAtUtc = '{{DateTimeOffset.UtcNow:O}}'
-}
-$launched | ConvertTo-Json -Compress | Set-Content -LiteralPath '{{markerPath}}' -Encoding UTF8
-Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
-""";
-
-        File.WriteAllText(scriptPath, script, Encoding.UTF8);
-        return scriptPath;
-    }
-
-    private static void StartRelaunchHelper(string scriptPath)
-    {
-        var startInfo = new ProcessStartInfo
-        {
-            FileName = "powershell.exe",
-            UseShellExecute = false,
-            CreateNoWindow = true,
-            WindowStyle = ProcessWindowStyle.Hidden
-        };
-        startInfo.ArgumentList.Add("-NoProfile");
-        startInfo.ArgumentList.Add("-ExecutionPolicy");
-        startInfo.ArgumentList.Add("Bypass");
-        startInfo.ArgumentList.Add("-File");
-        startInfo.ArgumentList.Add(scriptPath);
-        Process.Start(startInfo);
-    }
-
-    private void ExitForRelaunch()
-    {
-        try
-        {
-            Dispose();
-        }
-        catch (Exception ex)
-        {
-            _context.Log.Codex("Runtime", "Dispose during relaunch failed.", ex);
-        }
-        finally
-        {
-            Environment.Exit(0);
-        }
-    }
-
-    private static void CopyFileIfPresent(string source, string destination)
-    {
-        if (!File.Exists(source))
-        {
-            return;
-        }
-
-        Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
-        File.Copy(source, destination, overwrite: true);
     }
 
     private sealed class LifeEventRequest

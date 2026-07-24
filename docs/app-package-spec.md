@@ -7,13 +7,13 @@ MasterApp now supports three package types:
 
 ## Required files
 - `app.manifest.json` at package root.
-- `masterapp.ai.json` at package root is strongly recommended for any package that may be inspected or fixed through the MasterApp Codex/Ollama broker.
+- `masterapp.ai.json` at package root is strongly recommended for packages that should carry maintenance and navigation hints.
 - For `static` apps: a `wwwroot` folder and an `entry` file inside it.
 - For `portable` and `source` apps: a runnable `launch.executablePath`.
 
 ## Optional AI hints file
 
-`masterapp.ai.json` is a lightweight root-level hints file for brokered agents. It helps MasterApp switch context into an installed app without spending most of the step budget just discovering the project layout.
+`masterapp.ai.json` is a lightweight root-level hints file. It helps future maintainers switch context into an installed app without spending most of their time just discovering the project layout.
 
 Recommended shape:
 

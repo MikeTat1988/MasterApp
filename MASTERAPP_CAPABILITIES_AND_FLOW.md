@@ -1,34 +1,18 @@
 # MasterApp Capabilities And Full Flow
 
-## What MasterApp is
+## What MasterApp Is
 
-MasterApp is a Windows tray-hosted app runtime and packaging hub for local or phone-accessible apps.
+MasterApp is a Windows tray-hosted app runtime and packaging hub for local or phone-accessible web apps.
 
 At a high level it does five jobs:
 
 1. Watches an inbox folder for app package ZIPs.
 2. Installs those apps locally into `%LOCALAPPDATA%\MasterApp\Apps\...`.
-3. Serves or proxies installed apps through one local web host.
-4. Optionally exposes the same surface through a Cloudflare tunnel for phone access.
-5. Hosts a built-in Codex panel so the machine can inspect, debug, and modify allowed workspaces through a brokered flow.
+3. Serves static apps or proxies runnable apps through one stable host.
+4. Provides phone access either through local Wi-Fi lazy mode or through an optional Cloudflare tunnel.
+5. Keeps install, runtime, publish, and log state on disk for predictable operation.
 
-This document describes both the product capabilities and the end-to-end flow as the current repository implements them.
-
-## Live folders and state on this machine
-
-Current live settings are read from:
-
-- `%LOCALAPPDATA%\MasterApp\State\settings.json`
-
-Current configured inbox path on this machine:
-
-- `G:\My Drive\MasterApp\Incoming`
-
-Current configured archive/output paths on this machine:
-
-- `processedFolder`: `C:\MasterApp\Processed`
-- `failedFolder`: `C:\MasterApp\Failed`
-- `publishedFolder`: `C:\MasterApp\Published`
+## Live Folders And State
 
 Main local state area:
 
@@ -46,17 +30,17 @@ Main logs area:
 
 - `%LOCALAPPDATA%\MasterApp\Logs\`
 
-## Core capabilities
+## Core Capabilities
 
-### 1. Package inbox and automatic install
+### 1. Package Inbox And Automatic Install
 
-MasterApp treats `incomingFolder` as a live inbox. It scans only top-level `*.zip` files there.
+MasterApp treats `incomingFolder` as a live inbox and scans only top-level `*.zip` files.
 
 What it can install:
 
 - `static` apps: HTML/CSS/JS served directly from `wwwroot`
 - `portable` apps: prebuilt runnable apps that MasterApp starts and proxies
-- `source` apps: source packages that MasterApp builds during install, then runs and proxies like portable apps
+- `source` apps: source packages that MasterApp builds during install
 
 What happens during install:
 
@@ -68,13 +52,11 @@ What happens during install:
 6. If the same app is currently running, MasterApp stops that app before reinstall.
 7. It installs the package into `%LOCALAPPDATA%\MasterApp\Apps\<appId>\<version>\`.
 8. It preserves declared `dataDirectories` through `%LOCALAPPDATA%\MasterApp\Apps\<appId>\_shared\`.
-9. It validates the installed layout:
-   - `static`: `wwwroot` plus the declared entry file must exist
-   - runnable apps: `launch.kind` must be `webApp` and `launch.executablePath` must exist
+9. It validates the installed layout.
 10. On success it moves the original ZIP to `Processed`.
 11. On failure it moves the ZIP to `Failed` and writes a sibling `.error.txt`.
 
-### 2. Hosted app serving and proxying
+### 2. Hosted App Serving And Proxying
 
 Installed apps are available through MasterApp under:
 
@@ -87,14 +69,14 @@ Behavior by app type:
 
 Important hosted behavior:
 
-- MasterApp is the stable outer host
-- runnable apps do not need to expose themselves directly to the user
-- phone-facing access can stay under the same outer URL shape
-- absolute-path apps are normalized by the host/proxy layer so hosted apps can live under `/apps/<appId>/...`
+- MasterApp is the stable outer host.
+- Runnable apps do not need to expose themselves directly to the user.
+- Phone-facing access uses the same outer URL shape.
+- Absolute-path apps are normalized by the host/proxy layer so hosted apps can live under `/apps/<appId>/...`.
 
-### 3. App process orchestration
+### 3. App Process Orchestration
 
-For runnable apps MasterApp manages process lifecycle:
+For runnable apps MasterApp:
 
 - starts apps on demand
 - assigns or manages runtime port usage
@@ -102,14 +84,14 @@ For runnable apps MasterApp manages process lifecycle:
 - can stop a running app from the dashboard/API
 - restarts running apps when needed to pick up a newly installed version
 
-EXE-based apps are expected to cooperate with MasterApp:
+EXE-based apps are expected to:
 
 - bind to `MASTERAPP_PORT` or `ASPNETCORE_URLS`
 - expose a health endpoint such as `/api/health`
 - keep running until MasterApp stops them
 - avoid hard-coded absolute paths
 
-### 4. Publish flow
+### 4. Publish Flow
 
 Installed apps can optionally expose a publish capability through the manifest `publish` block.
 
@@ -121,14 +103,7 @@ When publish is available, MasterApp can:
 4. If `createZip` is true, build a new installable ZIP beside the publish output.
 5. When publishing a `source` app, repackage the published payload as an installable `portable` package.
 
-This means MasterApp supports two distinct lanes:
-
-- install from inbox ZIP
-- publish shareable output from an already installed app
-
-### 5. Tray application and operator controls
-
-MasterApp is primarily a Windows tray app.
+### 5. Tray Application And Operator Controls
 
 Current tray actions include:
 
@@ -140,19 +115,16 @@ Current tray actions include:
 - Stop Tunnel
 - Quit
 
-Operational meaning:
+In lazy local mode, Phone QR points to a local Wi-Fi ticket. In standard mode, it points to the configured public URL.
 
-- the tray is the operator/admin surface
-- the hosted app pages are the app/user surface
-- phone access and admin controls are intentionally different concerns
-
-### 6. Local web host and dashboard/API surface
+### 6. Local Web Host And API Surface
 
 MasterApp starts a local web host on:
 
-- `http://localhost:<localPort>`
+- standard mode: `http://localhost:<localPort>`
+- lazy local mode: `http://0.0.0.0:<selectedPort>` with loopback and LAN URLs reported through `/api/status`
 
-Important local endpoints include:
+Important endpoints include:
 
 - `/healthz`
 - `/api/status`
@@ -167,80 +139,44 @@ Important local endpoints include:
 - `/api/tunnel/start`
 - `/api/tunnel/stop`
 - `/api/tunnel/restart`
-- `/api/codex`
-- `/api/codex/events`
-- `/api/codex/messages`
-- `/api/codex/model`
-- `/api/codex/stop`
-- `/api/codex/session/new`
-- `/api/codex/approval`
 - `/api/phone-qr.svg`
+- `/phone/scan`
+- `/phone/connect`
 
-Built-in UI pages include:
+Tunnel endpoints are mapped only outside lazy local mode.
 
-- `dashboard.html`
-- `store.html`
-- `qr.html`
+### 7. Phone Access Modes
 
-### 7. Cloudflare tunnel and phone access
-
-MasterApp can expose its hosted surface through a Cloudflare tunnel.
-
-Capabilities:
+Standard mode can expose MasterApp through Cloudflare:
 
 - start tunnel
 - stop tunnel
 - restart tunnel
-- auto-start tunnel at runtime start if configured
-- expose a public hostname
+- auto-start tunnel if configured
 - generate a QR code that points to the public URL
 
-This is what makes the phone-facing flow possible without shipping a native iOS app package.
+Lazy local mode exposes MasterApp only on the current machine's LAN:
 
-Phone model:
+- chooses `preferredLocalPort` or a nearby free fallback port
+- binds the web host for LAN access
+- generates a short-lived QR ticket
+- grants the phone a session cookie after scanning
+- keeps the same `/apps/<appId>/` app URLs
 
-- apps are still web apps
-- users access them through HTTPS
-- iPhone installation is browser-based via Safari "Add to Home Screen"
-- MasterApp does not generate native iOS binaries
+This keeps the simple home Wi-Fi workflow separate from the public-hostname workflow.
 
-### 8. Codex panel inside MasterApp
-
-MasterApp includes a built-in Codex tab that brokers local Codex CLI usage.
-
-Current capabilities:
-
-- reads recent chats and model state from the local Codex environment
-- exposes a chat UI in the dashboard
-- can start, stream, stop, and reset Codex runs
-- can switch model through the UI/API
-- keeps recent operation history in runtime state
-- persists relaunch/build-related run metadata
-- supports approval-driven execution instead of silent machine control
-- injects workspace policy and optional `masterapp.ai.json` hints
-
-Operational constraints of the panel:
-
-- allowed workspaces come from `settings.json -> workspacePaths`
-- build and restart actions stay under MasterApp control
-- approval decisions are explicit API events
-- restart scheduling is handled by MasterApp with backup state, relaunch marker, and helper flow
-
-### 9. Runtime state, logs, and diagnostics
-
-MasterApp keeps product-state and debugging state on disk.
+### 8. Runtime State, Logs, And Diagnostics
 
 Important persisted runtime information:
 
 - installed apps
 - active versions
 - run state
+- active local port
 - last package result
 - last publish result
 - last scan timestamp and reason
 - tunnel process state
-- Codex runtime state and recent operations
-- relaunch status
 
 Logs are separated by kind:
 
@@ -248,46 +184,37 @@ Logs are separated by kind:
 - tunnel
 - packages
 - ui
-- codex
 
-This gives MasterApp a real operational/debugging surface, not just a launcher.
+### 9. Safety And Upgrade Behavior
 
-### 10. Safety and upgrade behavior
+Important safety behaviors:
 
-Important safety behaviors implemented in the current code:
+- ZIPs are copied to temp before extraction.
+- Scans are top-level `*.zip` only.
+- Manifest paths are validated.
+- App installs use relative package contracts.
+- Data directories can survive upgrades through `_shared`.
+- Old versions are cleaned up after successful upgrade.
+- Source installs fail hard if build output is invalid.
+- Failed packages are archived with error text.
+- Web proxy does not auto-follow redirects blindly.
 
-- ZIPs are copied to temp before extraction
-- scans are top-level `*.zip` only
-- manifest paths are validated
-- app installs use relative package contracts
-- data directories can survive upgrades through `_shared`
-- old versions are cleaned up after successful upgrade
-- source installs fail hard if build output is invalid
-- failed packages are archived with error text
-- web proxy does not auto-follow redirects blindly
-- restart scheduling backs up key state before relaunch
+## End-To-End Flows
 
-## The full flow from zero to a running app
-
-### Flow A: MasterApp startup
+### Flow A: MasterApp Startup
 
 1. MasterApp boots from the Windows tray app.
 2. It loads bootstrap paths, settings, secrets, and runtime state.
 3. It ensures configured directories exist.
-4. It starts the local web host.
-5. It starts the package watcher.
-6. If `autoStartTunnel` is enabled, it starts the Cloudflare tunnel.
-7. The tray icon becomes the operator entry point.
+4. It selects a port.
+5. It starts the local web host.
+6. It starts the package watcher.
+7. In standard mode, it starts the Cloudflare tunnel when `autoStartTunnel` is enabled.
+8. The tray icon becomes the operator entry point.
 
-Result:
+### Flow B: User Drops A ZIP Into Incoming
 
-- local dashboard is reachable
-- apps can be scanned/served
-- phone/public access can come online
-
-### Flow B: User drops a ZIP into Incoming
-
-1. A package ZIP is copied into `G:\My Drive\MasterApp\Incoming`.
+1. A package ZIP is copied into `incomingFolder`.
 2. The watcher scan sees the top-level ZIP.
 3. MasterApp copies it to temp and extracts it.
 4. `app.manifest.json` is validated.
@@ -295,39 +222,35 @@ Result:
 6. If the same app is running, MasterApp stops that app first.
 7. The version is installed into `%LOCALAPPDATA%\MasterApp\Apps\<appId>\<version>\`.
 8. Shared data folders are synchronized from `_shared`.
-9. The runtime state is updated to mark the app installed.
+9. Runtime state is updated.
 10. The ZIP is moved to `Processed`, or to `Failed` plus `.error.txt` if anything breaks.
 
-Result:
-
-- the app is now installed and visible in the MasterApp app list
-
-### Flow C: User opens an installed app
+### Flow C: User Opens An Installed App
 
 1. The dashboard or store opens `/apps/<appId>/`.
 2. For a `static` app, MasterApp serves files directly.
 3. For a runnable app, MasterApp ensures the app process is running.
-4. The runtime assigns/uses the proper port and proxies requests to the app.
-5. The user sees a stable app URL through MasterApp rather than talking to the app process directly.
+4. The runtime assigns or uses the proper port and proxies requests to the app.
+5. The user sees a stable app URL through MasterApp.
 
-Result:
+### Flow D: Lazy Local Phone Use
 
-- static apps feel like hosted sites
-- runnable apps feel like hosted sites, even though they are local processes behind the proxy
+1. User runs the lazy local starter.
+2. MasterApp chooses a local port and reports loopback/LAN URLs.
+3. User opens Phone QR from tray or dashboard.
+4. The phone scans the QR while on the same Wi-Fi.
+5. MasterApp consumes the short-lived ticket and sets a session cookie.
+6. The phone opens the dashboard or any installed app under `/apps/<appId>/`.
 
-### Flow D: Phone/public use
+### Flow E: Public Phone Use
 
-1. Tunnel is configured with a public hostname.
-2. MasterApp exposes its surface through Cloudflare.
+1. Cloudflare is configured with a public hostname.
+2. MasterApp exposes its surface through the tunnel.
 3. The QR page or tray action points the phone to the public URL.
 4. The phone opens the hosted app under the same `/apps/<appId>/` structure.
-5. The user can optionally add the web app to the iPhone home screen.
+5. The user can optionally add the web app to the home screen.
 
-Result:
-
-- phone access works as a web-delivered app experience
-
-### Flow E: Publish an installed app
+### Flow F: Publish An Installed App
 
 1. The app must already be installed and must declare a `publish` block.
 2. User triggers publish from the UI/API.
@@ -336,59 +259,18 @@ Result:
 5. If requested, MasterApp also builds an installable ZIP from the published result.
 6. Runtime state stores the last publish result and artifact paths.
 
-Result:
+## Package Contract For Apps
 
-- MasterApp can act as both installer and exporter for app packages
+Every installable app package should:
 
-### Flow F: Codex-assisted maintenance
-
-1. User opens the Codex tab in MasterApp.
-2. The UI fetches `/api/codex` and subscribes to `/api/codex/events`.
-3. User sends a prompt to `/api/codex/messages`.
-4. MasterApp resolves workspace policy and permitted workspace access.
-5. The broker starts the local Codex CLI with the selected model/workspace.
-6. Events stream back into the UI.
-7. If approval is needed, MasterApp pauses and waits for an explicit approval decision.
-8. Build or relaunch requests stay under MasterApp's controlled relaunch path.
-
-Result:
-
-- MasterApp is not only the app host but also the maintenance shell for the allowed workspaces
-
-## Package contract for apps that want to run in MasterApp
-
-Every installable app package should be built around these truths:
-
-- exactly one root `app.manifest.json`
+- include exactly one root `app.manifest.json`
 - use relative paths only
 - choose the right `appType`
-- include `masterapp.ai.json` whenever brokered inspection/fixes matter
+- include `masterapp.ai.json` whenever maintenance hints matter
 - include a real bitmap app icon for Store-visible apps
 - use `dataDirectories` for persistent writable content
 
-Decision that should be made first for any new app:
-
-### Option 1: HTML-based app
-
-Use `static` when the app is pure frontend and does not need a local executable.
-
-Best for:
-
-- lightweight browser apps
-- fast packaging
-- low install complexity
-
-### Option 2: EXE-based app
-
-Use `portable` or `source` when the app needs C#, ASP.NET, local filesystem access, device integration, or richer Windows-native behavior.
-
-Best for:
-
-- local web apps backed by a local server
-- apps that need Windows integration
-- apps that should later publish a standalone/shareable build
-
-## Repository files that best explain MasterApp
+## Repository Files That Best Explain MasterApp
 
 Best first-stop docs:
 
@@ -402,7 +284,6 @@ Best first-stop code areas:
 - `src/MasterApp/Packages/PackageManager.cs`
 - `src/MasterApp/Packages/AppPublisher.cs`
 - `src/MasterApp/Hosting/AppProcessManager.cs`
-- `src/MasterApp/Hosting/CodexBrokerService.cs`
 - `src/MasterApp/Tray/MasterAppApplicationContext.cs`
 - `src/MasterApp/Storage/RuntimeStateStore.cs`
 
@@ -414,6 +295,6 @@ Main web assets:
 - `src/MasterApp/wwwroot/masterapp-ui.js`
 - `src/MasterApp/wwwroot/masterapp-ui.css`
 
-## Short summary
+## Short Summary
 
-MasterApp is a Windows tray runtime that turns app ZIPs into locally installed, web-served, optionally phone-accessible apps. It manages inbox install flow, hosted serving/proxying, process lifecycle, publish/export, Cloudflare-based public access, operator tray controls, runtime/log state, and a built-in Codex maintenance panel. The central contract is simple: package apps as a valid MasterApp ZIP, drop them into `Incoming`, and MasterApp handles install, hosting, and optional publish from there.
+MasterApp is a Windows tray runtime that turns app ZIPs into locally installed, web-served, optionally phone-accessible apps. It manages inbox install flow, hosted serving/proxying, process lifecycle, publish/export, Cloudflare public access, local Wi-Fi access, operator tray controls, runtime state, and logs.

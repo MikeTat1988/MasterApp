@@ -1,5 +1,4 @@
 using MasterApp.Bootstrap;
-using MasterApp.Hosting;
 using Microsoft.AspNetCore.Http;
 using System.Drawing;
 using System.Drawing.Drawing2D;
@@ -21,8 +20,7 @@ public sealed class LifeJournalService
         RootDirectory = Path.Combine(context.Paths.StateDirectory, "LifeJournal");
         _log = new LifeJournalLogger(RootDirectory);
         _store = new LifeJournalStore(RootDirectory, _log);
-        var fallback = new FakeLifeJournalAnalyzer(_log);
-        _analyzer = new CodexCliLifeJournalAnalyzer(ResolveSettings(context), _log, fallback);
+        _analyzer = new MetadataLifeJournalAnalyzer(_log);
         EnsureRuntimeAssets();
         _log.Info("LifeJournalService", $"LifeJournal initialized at {RootDirectory}.");
     }
@@ -189,27 +187,6 @@ public sealed class LifeJournalService
         {
             _log.Error("LifeJournalService", "Failed to copy runtime assets.", ex);
         }
-    }
-
-    private LifeJournalSettings ResolveSettings(BootstrapContext context)
-    {
-        var configuredCodexPath = string.IsNullOrWhiteSpace(_settings.CodexExecutablePath) ||
-                                  string.Equals(_settings.CodexExecutablePath, "codex", StringComparison.OrdinalIgnoreCase)
-            ? (string.IsNullOrWhiteSpace(context.Settings.CodexCommand) ? "codex" : context.Settings.CodexCommand)
-            : _settings.CodexExecutablePath;
-        var resolvedCodex = CodexExecutableResolver.Resolve(configuredCodexPath);
-
-        var settings = new LifeJournalSettings
-        {
-            CodexExecutablePath = resolvedCodex.ResolvedExecutablePath ?? configuredCodexPath,
-            MaxImagesForAnalysis = _settings.MaxImagesForAnalysis,
-            AnalysisTimeoutSeconds = _settings.AnalysisTimeoutSeconds,
-            AutoFinalizeHourLocal = _settings.AutoFinalizeHourLocal,
-            PhotoMaxWidth = _settings.PhotoMaxWidth,
-            JpegQuality = _settings.JpegQuality
-        };
-
-        return settings;
     }
 
     private static void TryDelete(string path)

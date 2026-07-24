@@ -32,7 +32,7 @@ Generated files are kept out of the repository. Release builds and share zips ar
 
 - Windows 10 or Windows 11
 - .NET 8 SDK
-- `cloudflared`
+- `cloudflared` only when using public Cloudflare access
 - Google Drive for Desktop if you want published builds to sync through Google Drive
 
 ## First-time setup
@@ -44,8 +44,7 @@ Generated files are kept out of the repository. Release builds and share zips ar
 4. Set `cloudflaredPath` to your local `cloudflared.exe`.
 5. Choose your working folders for `incomingFolder`, `processedFolder`, `failedFolder`, and `publishedFolder`.
 6. Open `%LOCALAPPDATA%\MasterApp\State\secrets.json`.
-7. Add your own Cloudflare tunnel token, hostname, and local port.
-8. In `%LOCALAPPDATA%\MasterApp\State\settings.json`, confirm `workspacePaths`, `codexCommand`, `preferredBuildCommand`, and `preferredRestartCommand` for the new Codex tab.
+7. Add your own Cloudflare tunnel token, hostname, and local port when using public access.
 
 `templates/state/secrets.example.json` contains placeholders only. Do not commit real secrets into this repository.
 
@@ -60,6 +59,17 @@ Every user should use their own Cloudflare account and tunnel.
 5. Put the matching hostname into `publicHostname`.
 
 MasterApp does not ship account-specific Cloudflare credentials in this repository.
+
+## Lazy local mode
+
+Lazy local mode is a no-public-tunnel setup for a home Wi-Fi workflow.
+
+1. Build or unpack the lazy-local distribution.
+2. Run `setup-lazy-local.bat`.
+3. Run `Start MasterApp Local.bat`.
+4. Open the dashboard and use `Phone QR` from the tray or dashboard.
+
+In this mode MasterApp binds to the LAN port selected from `preferredLocalPort` and nearby fallback ports. The phone joins through a short-lived QR ticket, then uses the same `/apps/<appId>/` routes as the normal hosted flow.
 
 ## Google Drive folder sync
 
@@ -101,50 +111,6 @@ For the exact package contract, see `docs/app-package-spec.md`.
 - `scripts\create-share-zip.bat` - build a clean source zip for another developer
 - `scripts\collect-logs.bat` - create `Desktop\MasterApp_Logs.zip` without exposing `secrets.json`
 
-## Codex Chat panel
-
-MasterApp now includes a `Codex` tab that uses the local Codex CLI already signed in on the machine.
-
-- the tab reads model choices and recent chats from the local Codex state in `%USERPROFILE%\.codex\`
-- the main chat stays async and clean: your prompt, a `Processing...` state, approval cards, and the final answer
-- every requested command pauses for approval before MasterApp executes it
-- allowed workspaces come from `settings.json -> workspacePaths`
-- model changes update the local Codex default in `config.toml`
-- build and restart requests stay under MasterApp control
-- before a self-restart, MasterApp backs up state from `%LOCALAPPDATA%\MasterApp\State\` into `%LOCALAPPDATA%\MasterApp\State\Backups\`
-- the relaunch helper writes a marker so the restarted app can report restart status in the Codex tab
-- logs, changed files, build output, executable resolution, and restart details live behind the Codex details panel instead of the main chat
-
-Suggested local values:
-
-```json
-{
-  "codexCommand": "codex",
-  "workspacePaths": [
-    "C:\\Dev\\MasterApp"
-  ],
-  "preferredBuildCommand": "dotnet build .\\src\\MasterApp\\MasterApp.csproj -c Debug",
-  "preferredRestartCommand": ".\\scripts\\run-masterapp.bat"
-}
-```
-
-If you need longer brokered runs in the Codex tab, add optional limits in `%LOCALAPPDATA%\\MasterApp\\State\\settings.json`:
-
-```json
-{
-  "codexMaxDecisionSteps": 20,
-  "ollamaMaxDecisionSteps": 36
-}
-```
-
-MasterApp now treats those settings as base budgets. The broker automatically increases the effective step budget for harder investigations such as:
-
-- diagnosing the main MasterApp workspace
-- working inside installed app packages
-- longer investigative or code-change prompts
-
-To help the broker converge faster, a workspace can include an optional `masterapp.ai.json` file at its root. MasterApp reads it and injects the app's own navigation hints into the broker prompt.
-
 ## Share the project
 
 Run:
@@ -182,7 +148,7 @@ The important rules to give the model are:
 
 - generate a single inbox-ready `.zip`
 - put exactly one `app.manifest.json` at the zip root
-- include `masterapp.ai.json` at the zip root whenever possible so brokered agents know where to start
+- include `masterapp.ai.json` at the zip root whenever possible so future maintenance has clear navigation hints
 - keep all manifest paths relative
 - choose the correct package type: `static`, `portable`, or `source`
 - for EXE-based apps, bind to `MASTERAPP_PORT` and expose a health endpoint such as `/api/health`

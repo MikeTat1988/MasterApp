@@ -242,13 +242,25 @@ public sealed class AppProcessManager : IDisposable
 
     public void Dispose()
     {
-        foreach (var key in _processes.Keys.ToArray())
-        {
-            Stop(key);
-        }
+        StopAll();
 
         _httpClient.Dispose();
         _portGate.Dispose();
+    }
+
+    public void StopAll()
+    {
+        var appIds = _processes.Keys
+            .Concat(_context.RuntimeStateStore.GetApps()
+                .Where(app => !string.Equals(app.Manifest.AppType, AppTypes.Static, StringComparison.OrdinalIgnoreCase))
+                .Select(app => app.Id))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+        foreach (var key in appIds)
+        {
+            Stop(key);
+        }
     }
 
     private Process StartProcess(InstalledAppState installed)

@@ -194,71 +194,19 @@ public sealed class RuntimeStateStore
         }
     }
 
-    public CodexRuntimeState GetCodexRuntime()
+    public int? GetActiveLocalPort()
     {
         lock (_gate)
         {
-            return Clone(_state.Codex);
+            return _state.ActiveLocalPort;
         }
     }
 
-    public IReadOnlyList<CodexOperationRecord> GetCodexOperations()
+    public void SetActiveLocalPort(int port)
     {
         lock (_gate)
         {
-            return _state.CodexOperations
-                .OrderByDescending(item => item.StartedAtUtc)
-                .Select(Clone)
-                .ToArray();
-        }
-    }
-
-    public void UpsertCodexOperation(CodexOperationRecord operation, int maxItems)
-    {
-        lock (_gate)
-        {
-            var index = _state.CodexOperations.FindIndex(item => string.Equals(item.Id, operation.Id, StringComparison.OrdinalIgnoreCase));
-            if (index >= 0)
-            {
-                _state.CodexOperations[index] = Clone(operation);
-            }
-            else
-            {
-                _state.CodexOperations.Add(Clone(operation));
-            }
-
-            _state.CodexOperations = _state.CodexOperations
-                .OrderByDescending(item => item.StartedAtUtc)
-                .Take(Math.Max(1, maxItems))
-                .ToList();
-
-            Save();
-        }
-    }
-
-    public void SetCodexRuntime(CodexRuntimeState runtime)
-    {
-        lock (_gate)
-        {
-            _state.Codex = Clone(runtime);
-            _state.Codex.UpdatedAtUtc = DateTimeOffset.UtcNow;
-            Save();
-        }
-    }
-
-    public RelaunchStatusRecord? GetLastRelaunch()
-    {
-        lock (_gate)
-        {
-            return _state.LastRelaunch is null ? null : Clone(_state.LastRelaunch);
-        }
-    }
-
-    public void SetLastRelaunch(RelaunchStatusRecord relaunch)
-    {
-        lock (_gate)
-        {
-            _state.LastRelaunch = Clone(relaunch);
+            _state.ActiveLocalPort = port;
             Save();
         }
     }
@@ -342,29 +290,4 @@ public sealed class RuntimeStateStore
         };
     }
 
-    private static RelaunchStatusRecord Clone(RelaunchStatusRecord value)
-    {
-        return new RelaunchStatusRecord
-        {
-            Status = value.Status,
-            Message = value.Message,
-            BackupDirectory = value.BackupDirectory,
-            Command = value.Command,
-            OperationId = value.OperationId,
-            RequestedAtUtc = value.RequestedAtUtc,
-            CompletedAtUtc = value.CompletedAtUtc
-        };
-    }
-
-    private static CodexRuntimeState Clone(CodexRuntimeState value)
-    {
-        var json = JsonSerializer.Serialize(value, JsonOptions.Default);
-        return JsonSerializer.Deserialize<CodexRuntimeState>(json, JsonOptions.Default) ?? new CodexRuntimeState();
-    }
-
-    private static CodexOperationRecord Clone(CodexOperationRecord value)
-    {
-        var json = JsonSerializer.Serialize(value, JsonOptions.Default);
-        return JsonSerializer.Deserialize<CodexOperationRecord>(json, JsonOptions.Default) ?? new CodexOperationRecord();
-    }
 }

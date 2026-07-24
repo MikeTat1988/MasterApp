@@ -19,7 +19,7 @@ if exist "%STAGE%" rmdir /s /q "%STAGE%" >nul 2>nul
 mkdir "%STAGE%"
 
 robocopy "%ROOT%" "%STAGE%" /E ^
-  /XD "%ROOT%\.git" "%ROOT%\.codex" "%ROOT%\.idea" "%ROOT%\.vs" "%ROOT%\artifacts" "%ROOT%\.share-stage" "%ROOT%\.test-state" "%ROOT%\src\MasterApp\bin" "%ROOT%\src\MasterApp\obj" "%ROOT%\src\MasterApp\dist" ^
+  /XD "%ROOT%\.git" "%ROOT%\.idea" "%ROOT%\.vs" "%ROOT%\artifacts" "%ROOT%\.share-stage" "%ROOT%\.test-state" "%ROOT%\src\MasterApp\bin" "%ROOT%\src\MasterApp\obj" "%ROOT%\src\MasterApp\dist" ^
   /XF "*.zip" "*.exe" "*.msi" "*.tmp" "*.pdb" ^
   /NJH /NJS /NFL /NDL /NP >nul
 

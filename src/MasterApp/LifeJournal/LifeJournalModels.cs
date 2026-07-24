@@ -37,7 +37,6 @@ public sealed class LifeDay
 
 public sealed class LifeJournalSettings
 {
-    public string CodexExecutablePath { get; set; } = "codex";
     public int MaxImagesForAnalysis { get; set; } = 16;
     public int AnalysisTimeoutSeconds { get; set; } = 240;
     public int AutoFinalizeHourLocal { get; set; } = 3;
@@ -54,6 +53,7 @@ public sealed class LifeAnalysisOutput
     public string Json { get; set; } = string.Empty;
     public string RawOutput { get; set; } = string.Empty;
     public List<string> Tags { get; set; } = new();
+    public List<string> Uncertainties { get; set; } = new();
     public bool UsedFallback { get; set; }
     public string? Error { get; set; }
 }

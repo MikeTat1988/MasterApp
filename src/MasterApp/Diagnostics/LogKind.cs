@@ -5,6 +5,5 @@ public enum LogKind
     App,
     Tunnel,
     Packages,
-    Ui,
-    Codex
+    Ui
 }

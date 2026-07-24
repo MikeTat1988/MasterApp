@@ -10,7 +10,10 @@ public static class Bootstrapper
     public static BootstrapContext Initialize()
     {
         var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-        var root = Path.Combine(localAppData, "MasterApp");
+        var rootOverride = Environment.GetEnvironmentVariable("MASTERAPP_ROOT");
+        var root = string.IsNullOrWhiteSpace(rootOverride)
+            ? Path.Combine(localAppData, "MasterApp")
+            : Path.GetFullPath(rootOverride);
         var state = Path.Combine(root, "State");
         var backups = Path.Combine(state, "Backups");
         var logs = Path.Combine(root, "Logs");
@@ -38,7 +41,6 @@ public static class Bootstrapper
             SettingsFile = Path.Combine(state, "settings.json"),
             SecretsFile = Path.Combine(state, "secrets.json"),
             RuntimeStateFile = Path.Combine(state, "runtime-state.json"),
-            RelaunchStateFile = Path.Combine(state, "relaunch-state.json"),
             ShutdownIntentFile = Path.Combine(state, "shutdown-intent.json"),
             WatchdogStateFile = Path.Combine(state, "watchdog-state.json")
         };
@@ -174,49 +176,13 @@ public static class Bootstrapper
 
     private static void NormalizeSettings(AppPaths paths, AppSettings settings, FileLogManager log)
     {
-        settings.WorkspacePaths = settings.WorkspacePaths
-            .Where(path => !string.IsNullOrWhiteSpace(path))
-            .Select(path => Path.GetFullPath(path))
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToList();
-
-        var detectedRoot = DetectWorkspaceRoot();
-        if (!string.IsNullOrWhiteSpace(detectedRoot) && !settings.WorkspacePaths.Contains(detectedRoot, StringComparer.OrdinalIgnoreCase))
-        {
-            settings.WorkspacePaths.Insert(0, detectedRoot);
-            log.Info("Bootstrapper", $"Added detected workspace path: {detectedRoot}");
-        }
-
-        if (!string.IsNullOrWhiteSpace(detectedRoot) &&
-            File.Exists(Path.Combine(detectedRoot, "src", "MasterApp", "MasterApp.csproj")))
-        {
-            if (string.IsNullOrWhiteSpace(settings.PreferredBuildCommand))
-            {
-                settings.PreferredBuildCommand = "dotnet build .\\src\\MasterApp\\MasterApp.csproj -c Debug";
-            }
-
-            if (string.IsNullOrWhiteSpace(settings.PreferredRestartCommand))
-            {
-                settings.PreferredRestartCommand = ".\\scripts\\run-masterapp.bat";
-            }
-        }
-
-        if (string.IsNullOrWhiteSpace(settings.CodexCommand))
-        {
-            settings.CodexCommand = "codex";
-        }
-
-        settings.CodexHistoryLimit = Math.Clamp(settings.CodexHistoryLimit, 1, 25);
-        settings.CodexMaxDecisionSteps = Math.Clamp(settings.CodexMaxDecisionSteps, 4, 100);
-        settings.OllamaMaxDecisionSteps = Math.Clamp(settings.OllamaMaxDecisionSteps, settings.CodexMaxDecisionSteps, 200);
-        settings.CodexUsageRequestsPer5Hours = Math.Clamp(settings.CodexUsageRequestsPer5Hours, 1, 5000);
-        settings.CodexUsageRequestsPerWeek = Math.Clamp(settings.CodexUsageRequestsPerWeek, settings.CodexUsageRequestsPer5Hours, 50000);
-        settings.ConfigBackupRetentionCount = Math.Clamp(settings.ConfigBackupRetentionCount, 1, 50);
+        settings.RuntimeMode = string.Equals(settings.RuntimeMode, "lazy-local", StringComparison.OrdinalIgnoreCase)
+            ? "lazy-local"
+            : "standard";
+        settings.PreferredLocalPort = Math.Clamp(settings.PreferredLocalPort, 1, 65535);
+        settings.LocalPortFallbackCount = Math.Clamp(settings.LocalPortFallbackCount, 0, 100);
+        settings.SessionQrTtlSeconds = Math.Clamp(settings.SessionQrTtlSeconds, 15, 3600);
         settings.LifeJournal ??= new();
-        if (string.IsNullOrWhiteSpace(settings.LifeJournal.CodexExecutablePath))
-        {
-            settings.LifeJournal.CodexExecutablePath = "codex";
-        }
 
         settings.LifeJournal.MaxImagesForAnalysis = Math.Clamp(settings.LifeJournal.MaxImagesForAnalysis, 1, 64);
         settings.LifeJournal.AnalysisTimeoutSeconds = Math.Clamp(settings.LifeJournal.AnalysisTimeoutSeconds, 5, 3600);
@@ -225,62 +191,14 @@ public static class Bootstrapper
         settings.LifeJournal.JpegQuality = Math.Clamp(settings.LifeJournal.JpegQuality, 35, 95);
     }
 
-    private static string? DetectWorkspaceRoot()
-    {
-        foreach (var candidate in GetCandidateRoots())
-        {
-            var current = candidate;
-            while (!string.IsNullOrWhiteSpace(current))
-            {
-                if (File.Exists(Path.Combine(current, "src", "MasterApp", "MasterApp.csproj")))
-                {
-                    return current;
-                }
-
-                var parent = Directory.GetParent(current);
-                if (parent is null)
-                {
-                    break;
-                }
-
-                current = parent.FullName;
-            }
-        }
-
-        return null;
-    }
-
-    private static IEnumerable<string> GetCandidateRoots()
-    {
-        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var candidates = new[]
-        {
-            AppContext.BaseDirectory,
-            Directory.GetCurrentDirectory(),
-            AppDomain.CurrentDomain.BaseDirectory
-        };
-
-        foreach (var candidate in candidates)
-        {
-            if (string.IsNullOrWhiteSpace(candidate))
-            {
-                continue;
-            }
-
-            var full = Path.GetFullPath(candidate);
-            if (seen.Add(full))
-            {
-                yield return full;
-            }
-        }
-    }
-
     private static List<string> Validate(AppSettings settings, AppSecrets secrets, FileLogManager log)
     {
         var issues = new List<string>();
+        var isLazyLocal = string.Equals(settings.RuntimeMode, "lazy-local", StringComparison.OrdinalIgnoreCase);
 
-        if (string.IsNullOrWhiteSpace(secrets.CloudflareTunnelToken) ||
-            secrets.CloudflareTunnelToken.Contains("PASTE_TOKEN_HERE", StringComparison.OrdinalIgnoreCase))
+        if (!isLazyLocal &&
+            (string.IsNullOrWhiteSpace(secrets.CloudflareTunnelToken) ||
+             secrets.CloudflareTunnelToken.Contains("PASTE_TOKEN_HERE", StringComparison.OrdinalIgnoreCase)))
         {
             issues.Add("TOKEN_MISSING: secrets.json does not contain a real Cloudflare tunnel token.");
         }
@@ -290,12 +208,12 @@ public static class Bootstrapper
             issues.Add("LOCAL_PORT_INVALID: localPort must be between 1 and 65535.");
         }
 
-        if (string.IsNullOrWhiteSpace(secrets.PublicHostname))
+        if (!isLazyLocal && string.IsNullOrWhiteSpace(secrets.PublicHostname))
         {
             issues.Add("PUBLIC_HOSTNAME_MISSING: publicHostname is empty.");
         }
 
-        if (!File.Exists(settings.CloudflaredPath))
+        if (!isLazyLocal && !File.Exists(settings.CloudflaredPath))
         {
             issues.Add($"CLOUDFLARED_NOT_FOUND: {settings.CloudflaredPath}");
         }
