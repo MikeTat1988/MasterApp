@@ -30,6 +30,7 @@ namespace MasterApp.Hosting;
 public sealed class MasterAppRuntime : IDisposable
 {
     private readonly BootstrapContext _context;
+    private readonly AppLifecycleCoordinator _appLifecycle;
     private readonly PackageManager _packageManager;
     private readonly AppPublisher _appPublisher;
     private readonly PackageWatcherService _packageWatcher;
@@ -50,11 +51,12 @@ public sealed class MasterAppRuntime : IDisposable
     public MasterAppRuntime(BootstrapContext context)
     {
         _context = context;
-        _packageManager = new PackageManager(_context);
+        _appLifecycle = new AppLifecycleCoordinator();
+        _appProcessManager = new AppProcessManager(_context, _appLifecycle);
+        _packageManager = new PackageManager(_context, _appLifecycle);
         _appPublisher = new AppPublisher(_context);
         _packageWatcher = new PackageWatcherService(_packageManager, _context.Log, _context.Settings.PackageScanIntervalSeconds);
         _watchdogStateStore = new WatchdogStateStore(_context.Paths, _context.Log);
-        _appProcessManager = new AppProcessManager(_context);
         _tunnelManager = new TunnelManager(_context);
         _wifiNetworkInspector = new WifiNetworkInspector();
         _remoteAccessSessionManager = new RemoteAccessSessionManager(_context.Settings.SessionQrTtlSeconds);
@@ -221,7 +223,8 @@ public sealed class MasterAppRuntime : IDisposable
                 return OperationResult.Failure($"APP_NOT_FOUND: {appId}");
             }
 
-            var stopResult = _appProcessManager.Stop(appId);
+            using var lifecycleLease = _appLifecycle.Enter(appId);
+            var stopResult = _appProcessManager.StopWhileLifecycleLocked(appId);
             if (!stopResult.Ok)
             {
                 _context.Log.Warn("Runtime", $"Delete requested for app '{appId}', but stopping it first failed: {stopResult.Message}");
@@ -232,12 +235,17 @@ public sealed class MasterAppRuntime : IDisposable
             var appRoot = Path.GetFullPath(Path.Combine(appsRoot, app.Id))
                 .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
 
-            if (!appRoot.StartsWith(appsRoot, StringComparison.OrdinalIgnoreCase))
+            if (!AppProcessUtilities.IsPathUnderDirectory(appRoot, appsRoot))
             {
                 throw new InvalidOperationException("APP_DELETE_PATH_INVALID");
             }
 
-            StopAppProcessesFromDirectory(app.Id, appRoot);
+            AppProcessUtilities.StopProcessesFromDirectory(
+                app.Id,
+                appRoot,
+                message => _context.Log.Info("Runtime", message),
+                message => _context.Log.Warn("Runtime", message),
+                waitForExitMilliseconds: 5000);
 
             if (!_context.RuntimeStateStore.RemoveApp(appId))
             {
@@ -290,63 +298,6 @@ public sealed class MasterAppRuntime : IDisposable
         var message = $"App files could not be removed yet: {lastError?.Message}";
         _context.Log.Warn("Runtime", $"Deleted app '{appId}' from runtime state, but file cleanup failed for {appRoot}. {lastError?.Message}");
         return message;
-    }
-
-    private void StopAppProcessesFromDirectory(string appId, string appRoot)
-    {
-        var normalizedRoot = Path.GetFullPath(appRoot)
-            .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-
-        foreach (var process in Process.GetProcesses())
-        {
-            using (process)
-            {
-                string? processPath;
-                try
-                {
-                    if (process.HasExited)
-                    {
-                        continue;
-                    }
-
-                    processPath = process.MainModule?.FileName;
-                }
-                catch
-                {
-                    continue;
-                }
-
-                if (!IsPathUnderDirectory(processPath, normalizedRoot))
-                {
-                    continue;
-                }
-
-                try
-                {
-                    _context.Log.Info("Runtime", $"Stopping process {process.Id} from deleted app '{appId}': {processPath}");
-                    process.Kill(entireProcessTree: true);
-                    process.WaitForExit(5000);
-                }
-                catch (Exception ex)
-                {
-                    _context.Log.Warn("Runtime", $"Could not stop process {process.Id} while deleting app '{appId}': {ex.Message}");
-                }
-            }
-        }
-    }
-
-    private static bool IsPathUnderDirectory(string? path, string directory)
-    {
-        if (string.IsNullOrWhiteSpace(path))
-        {
-            return false;
-        }
-
-        var fullPath = Path.GetFullPath(path)
-            .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-
-        return fullPath.StartsWith(directory + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) ||
-               fullPath.StartsWith(directory + Path.AltDirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
     }
 
     public void OpenDashboard() => ShellHelper.OpenPath(LocalUrl);

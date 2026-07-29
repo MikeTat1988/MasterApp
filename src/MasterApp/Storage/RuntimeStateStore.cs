@@ -61,12 +61,8 @@ public sealed class RuntimeStateStore
                 existing.Manifest = Clone(app.Manifest);
                 existing.RunState = Clone(app.RunState);
                 existing.LastPublishedArtifact = app.LastPublishedArtifact is null ? null : Clone(app.LastPublishedArtifact);
-                if (!existing.Versions.Contains(app.ActiveVersion, StringComparer.OrdinalIgnoreCase))
-                {
-                    existing.Versions.Add(app.ActiveVersion);
-                }
-
-                existing.Versions = existing.Versions
+                existing.Versions = app.Versions
+                    .Append(app.ActiveVersion)
                     .Distinct(StringComparer.OrdinalIgnoreCase)
                     .OrderBy(x => x, StringComparer.OrdinalIgnoreCase)
                     .ToList();
@@ -98,6 +94,21 @@ public sealed class RuntimeStateStore
                 app.RunState = Clone(runState);
                 Save();
             }
+        }
+    }
+
+    public bool UpdateRunStateIfProcessId(string appId, int expectedProcessId, AppRunState runState)
+    {
+        lock (_gate)
+        {
+            if (!_state.Apps.TryGetValue(appId, out var app) || app.RunState.ProcessId != expectedProcessId)
+            {
+                return false;
+            }
+
+            app.RunState = Clone(runState);
+            Save();
+            return true;
         }
     }
 

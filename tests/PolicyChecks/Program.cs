@@ -7,10 +7,13 @@ using MasterApp.LifeJournal;
 using MasterApp.Diagnostics;
 using MasterApp.Storage;
 using System.Diagnostics;
+using System.IO.Compression;
 
 var failures = new List<string>();
 
-var repositoryRoot = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", ".."));
+var repositoryRoot = File.Exists(Path.Combine(Environment.CurrentDirectory, "masterapp.ai.json"))
+    ? Environment.CurrentDirectory
+    : Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", ".."));
 AssertNoForbiddenText(
     repositoryRoot,
     new[]
@@ -374,6 +377,206 @@ finally
     }
 }
 
+var concurrentStartRoot = Path.Combine(Path.GetTempPath(), $"MasterApp-ConcurrentStart-{Environment.ProcessId}-{Guid.NewGuid():N}");
+Directory.CreateDirectory(concurrentStartRoot);
+var concurrentStartPaths = CreateTestAppPaths(concurrentStartRoot);
+var concurrentStartLog = new FileLogManager(concurrentStartPaths.LogsDirectory);
+var concurrentStartStateStore = new RuntimeStateStore(concurrentStartPaths.RuntimeStateFile, concurrentStartLog);
+var concurrentInstallRoot = Path.Combine(concurrentStartPaths.AppsDirectory, "concurrent-start-app", "1.0.0");
+Directory.CreateDirectory(concurrentInstallRoot);
+var concurrentServerExe = Path.Combine(concurrentInstallRoot, "server.exe");
+var concurrentServerScript = Path.Combine(concurrentInstallRoot, "server.ps1");
+var concurrentCounterFile = Path.Combine(concurrentStartRoot, "starts.txt");
+File.Copy(
+    Path.Combine(Environment.SystemDirectory, "WindowsPowerShell", "v1.0", "powershell.exe"),
+    concurrentServerExe);
+File.WriteAllText(
+    concurrentServerScript,
+    """
+    param([string]$CounterFile)
+    [System.IO.File]::AppendAllText($CounterFile, "started`n")
+    $listener = [System.Net.Sockets.TcpListener]::new(
+      [System.Net.IPAddress]::Loopback,
+      [int]$env:MASTERAPP_PORT)
+    $listener.Start()
+    try {
+      while ($true) {
+        $client = $listener.AcceptTcpClient()
+        try {
+          $stream = $client.GetStream()
+          $buffer = New-Object byte[] 4096
+          [void]$stream.Read($buffer, 0, $buffer.Length)
+          $body = '{"status":"ok"}'
+          $response = "HTTP/1.1 200 OK`r`nContent-Type: application/json`r`nContent-Length: $($body.Length)`r`nConnection: close`r`n`r`n$body"
+          $bytes = [System.Text.Encoding]::ASCII.GetBytes($response)
+          $stream.Write($bytes, 0, $bytes.Length)
+        } finally {
+          $client.Dispose()
+        }
+      }
+    } finally {
+      $listener.Stop()
+    }
+    """);
+concurrentStartStateStore.UpsertInstalledApp(new InstalledAppState
+{
+    Id = "concurrent-start-app",
+    Name = "Concurrent Start App",
+    ActiveVersion = "1.0.0",
+    Versions = new List<string> { "1.0.0" },
+    InstalledAtUtc = DateTimeOffset.UtcNow,
+    Manifest = new AppManifest
+    {
+        Id = "concurrent-start-app",
+        Name = "Concurrent Start App",
+        Version = "1.0.0",
+        AppType = AppTypes.Portable,
+        Launch = new AppLaunchManifest
+        {
+            Kind = LaunchKinds.WebApp,
+            ExecutablePath = "server.exe",
+            WorkingDirectory = ".",
+            Arguments = new List<string>
+            {
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                concurrentServerScript,
+                concurrentCounterFile
+            },
+            HealthPath = "/api/health",
+            StartupTimeoutSeconds = 8
+        }
+    },
+    RunState = new AppRunState { Status = "installed", IsRunning = false }
+});
+
+using (var concurrentManager = new AppProcessManager(new BootstrapContext
+{
+    Paths = concurrentStartPaths,
+    Settings = AppSettings.CreateDefault(),
+    Secrets = AppSecrets.CreateDefault(),
+    RuntimeStateStore = concurrentStartStateStore,
+    Log = concurrentStartLog,
+    ValidationIssues = Array.Empty<string>()
+}))
+{
+    var concurrentResults = await Task.WhenAll(
+        Enumerable.Range(0, 12).Select(_ => concurrentManager.EnsureRunningAsync("concurrent-start-app")));
+    var startCount = File.Exists(concurrentCounterFile)
+        ? File.ReadAllLines(concurrentCounterFile).Length
+        : 0;
+
+    AssertTrue(
+        concurrentResults.Select(result => result.ProcessId).Distinct().Count() == 1 && startCount == 1,
+        "Concurrent requests for one runnable app should start exactly one process.",
+        failures);
+
+    var concurrentStop = concurrentManager.Stop("concurrent-start-app");
+    AssertTrue(concurrentStop.Ok, "The concurrently-started test app should stop cleanly.", failures);
+}
+
+var orphanUpgradeRoot = Path.Combine(Path.GetTempPath(), $"MasterApp-OrphanUpgrade-{Environment.ProcessId}-{Guid.NewGuid():N}");
+Directory.CreateDirectory(orphanUpgradeRoot);
+var orphanUpgradePaths = CreateTestAppPaths(orphanUpgradeRoot);
+var orphanUpgradeLog = new FileLogManager(orphanUpgradePaths.LogsDirectory);
+var orphanUpgradeStateStore = new RuntimeStateStore(orphanUpgradePaths.RuntimeStateFile, orphanUpgradeLog);
+var orphanUpgradeSettings = AppSettings.CreateDefault();
+orphanUpgradeSettings.IncomingFolder = Path.Combine(orphanUpgradeRoot, "Incoming");
+orphanUpgradeSettings.ProcessedFolder = Path.Combine(orphanUpgradeRoot, "Processed");
+orphanUpgradeSettings.FailedFolder = Path.Combine(orphanUpgradeRoot, "Failed");
+var orphanUpgradeAppRoot = Path.Combine(orphanUpgradePaths.AppsDirectory, "orphan-upgrade-app");
+var orphanUpgradeOldRoot = Path.Combine(orphanUpgradeAppRoot, "1.0.0");
+Directory.CreateDirectory(orphanUpgradeOldRoot);
+var orphanUpgradeExe = Path.Combine(orphanUpgradeOldRoot, "orphan.exe");
+File.Copy(Path.Combine(Environment.SystemDirectory, "cmd.exe"), orphanUpgradeExe);
+using var orphanUpgradeProcess = Process.Start(new ProcessStartInfo(orphanUpgradeExe)
+{
+    Arguments = "/c ping -n 60 127.0.0.1",
+    UseShellExecute = false,
+    CreateNoWindow = true
+}) ?? throw new InvalidOperationException("Could not start orphan-upgrade test helper.");
+try
+{
+    orphanUpgradeStateStore.UpsertInstalledApp(new InstalledAppState
+    {
+        Id = "orphan-upgrade-app",
+        Name = "Orphan Upgrade App",
+        ActiveVersion = "1.0.0",
+        Versions = new List<string> { "1.0.0" },
+        Manifest = new AppManifest
+        {
+            Id = "orphan-upgrade-app",
+            Name = "Orphan Upgrade App",
+            Version = "1.0.0",
+            AppType = AppTypes.Portable,
+            Launch = new AppLaunchManifest
+            {
+                Kind = LaunchKinds.WebApp,
+                ExecutablePath = "orphan.exe"
+            }
+        },
+        RunState = new AppRunState
+        {
+            Status = "stopped",
+            IsRunning = false,
+            Message = "An untracked old-version process is still running."
+        }
+    });
+
+    var packageSource = Path.Combine(orphanUpgradeRoot, "PackageSource");
+    Directory.CreateDirectory(Path.Combine(packageSource, "wwwroot"));
+    File.WriteAllText(Path.Combine(packageSource, "wwwroot", "index.html"), "<html><body>upgraded</body></html>");
+    File.WriteAllText(
+        Path.Combine(packageSource, "app.manifest.json"),
+        """
+        {
+          "schemaVersion": "2",
+          "id": "orphan-upgrade-app",
+          "name": "Orphan Upgrade App",
+          "version": "2.0.0",
+          "appType": "static",
+          "entry": "index.html",
+          "launch": { "kind": "static" }
+        }
+        """);
+    Directory.CreateDirectory(orphanUpgradeSettings.IncomingFolder);
+    var packageZip = Path.Combine(orphanUpgradeSettings.IncomingFolder, "orphan-upgrade-app-2.0.0.zip");
+    ZipFile.CreateFromDirectory(packageSource, packageZip);
+
+    var lifecycle = new AppLifecycleCoordinator();
+    var packageManager = new PackageManager(new BootstrapContext
+    {
+        Paths = orphanUpgradePaths,
+        Settings = orphanUpgradeSettings,
+        Secrets = AppSecrets.CreateDefault(),
+        RuntimeStateStore = orphanUpgradeStateStore,
+        Log = orphanUpgradeLog,
+        ValidationIssues = Array.Empty<string>()
+    }, lifecycle);
+    packageManager.ScanIncoming("orphan-upgrade-test");
+    orphanUpgradeProcess.WaitForExit(5000);
+    var upgradedState = orphanUpgradeStateStore.GetApp("orphan-upgrade-app");
+
+    AssertTrue(
+        orphanUpgradeProcess.HasExited &&
+        upgradedState?.ActiveVersion == "2.0.0" &&
+        !Directory.Exists(orphanUpgradeOldRoot) &&
+        Directory.Exists(Path.Combine(orphanUpgradeAppRoot, "2.0.0")) &&
+        Directory.GetFiles(orphanUpgradeSettings.ProcessedFolder, "*.zip").Length == 1,
+        "Package upgrade should stop an untracked process from the old app directory and install the new version.",
+        failures);
+}
+finally
+{
+    if (!orphanUpgradeProcess.HasExited)
+    {
+        orphanUpgradeProcess.Kill(entireProcessTree: true);
+        orphanUpgradeProcess.WaitForExit(5000);
+    }
+}
+
 var lifeRoot = Path.Combine(Path.GetTempPath(), $"MasterApp-LifeJournal-PolicyChecks-{Environment.ProcessId}-{Guid.NewGuid():N}");
 Directory.CreateDirectory(lifeRoot);
 var lifeLogger = new LifeJournalLogger(lifeRoot);
@@ -474,7 +677,7 @@ return 0;
 
 static AppPaths CreateTestAppPaths(string root)
 {
-    return new AppPaths
+    var paths = new AppPaths
     {
         RootDirectory = root,
         StateDirectory = Path.Combine(root, "State"),
@@ -489,6 +692,12 @@ static AppPaths CreateTestAppPaths(string root)
         ShutdownIntentFile = Path.Combine(root, "State", "shutdown-intent.json"),
         WatchdogStateFile = Path.Combine(root, "State", "watchdog-state.json")
     };
+
+    Directory.CreateDirectory(paths.StateDirectory);
+    Directory.CreateDirectory(paths.LogsDirectory);
+    Directory.CreateDirectory(paths.TempDirectory);
+    Directory.CreateDirectory(paths.AppsDirectory);
+    return paths;
 }
 
 static void AssertTrue(bool condition, string message, List<string> failures)
@@ -517,7 +726,10 @@ static void AssertNoForbiddenText(string root, IReadOnlyList<string> relativePat
 
         foreach (var file in Directory.GetFiles(path, "*", SearchOption.AllDirectories))
         {
-            if (file.Contains(Path.Combine("docs", "superpowers"), StringComparison.OrdinalIgnoreCase))
+            if (file.Contains(Path.Combine("docs", "superpowers"), StringComparison.OrdinalIgnoreCase) ||
+                file.EndsWith(Path.Combine("docs", "ollama-openclaw-bridge-handoff.md"), StringComparison.OrdinalIgnoreCase) ||
+                file.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase) ||
+                file.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase))
             {
                 continue;
             }

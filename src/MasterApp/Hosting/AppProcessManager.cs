@@ -13,6 +13,7 @@ namespace MasterApp.Hosting;
 public sealed class AppProcessManager : IDisposable
 {
     private readonly BootstrapContext _context;
+    private readonly AppLifecycleCoordinator _lifecycle;
     private readonly ConcurrentDictionary<string, ManagedAppProcess> _processes = new(StringComparer.OrdinalIgnoreCase);
     private readonly HttpClient _httpClient = new(new HttpClientHandler { AllowAutoRedirect = false })
     {
@@ -21,8 +22,14 @@ public sealed class AppProcessManager : IDisposable
     private readonly SemaphoreSlim _portGate = new(1, 1);
 
     public AppProcessManager(BootstrapContext context)
+        : this(context, new AppLifecycleCoordinator())
+    {
+    }
+
+    public AppProcessManager(BootstrapContext context, AppLifecycleCoordinator lifecycle)
     {
         _context = context;
+        _lifecycle = lifecycle;
     }
 
     public AppRunState Snapshot(string appId)
@@ -56,6 +63,12 @@ public sealed class AppProcessManager : IDisposable
 
     public async Task<AppRunState> EnsureRunningAsync(string appId, CancellationToken cancellationToken = default)
     {
+        using var lease = await _lifecycle.EnterAsync(appId, cancellationToken);
+        return await EnsureRunningCoreAsync(appId, cancellationToken);
+    }
+
+    private async Task<AppRunState> EnsureRunningCoreAsync(string appId, CancellationToken cancellationToken)
+    {
         var installed = _context.RuntimeStateStore.GetApp(appId)
                        ?? throw new InvalidOperationException($"APP_NOT_FOUND: {appId}");
 
@@ -77,7 +90,7 @@ public sealed class AppProcessManager : IDisposable
             if (ShouldRestartForInstalledUpdate(installed, existing.Process))
             {
                 _context.Log.Info("AppProcessManager", $"Restarting app '{appId}' to pick up installed version {installed.ActiveVersion}.");
-                var stopResult = Stop(appId);
+                var stopResult = StopCore(appId);
                 if (!stopResult.Ok)
                 {
                     throw new InvalidOperationException(stopResult.Message);
@@ -87,21 +100,39 @@ public sealed class AppProcessManager : IDisposable
             }
             else
             {
-            var existingState = BuildRunState(installed, existing.Process, "running", "App is already running.");
-            _context.RuntimeStateStore.UpdateRunState(appId, existingState);
-            return existingState;
+                var existingState = BuildRunState(installed, existing.Process, "running", "App is already running.");
+                _context.RuntimeStateStore.UpdateRunState(appId, existingState);
+                return existingState;
             }
         }
 
         installed = await EnsureAssignedPortAsync(installed, cancellationToken);
-        var process = StartProcess(installed);
-        var runState = await WaitUntilHealthyAsync(installed, process, cancellationToken);
-        _processes[appId] = new ManagedAppProcess(installed.Id, process);
-        _context.RuntimeStateStore.UpdateRunState(appId, runState);
-        return runState;
+        var managed = StartProcess(installed);
+        _processes[appId] = managed;
+        _context.RuntimeStateStore.UpdateRunState(appId, BuildRunState(installed, managed.Process, "starting", "App is starting."));
+
+        try
+        {
+            var runState = await WaitUntilHealthyAsync(installed, managed.Process, cancellationToken);
+            _context.RuntimeStateStore.UpdateRunState(appId, runState);
+            return runState;
+        }
+        catch
+        {
+            CleanupFailedStart(installed.Id, managed);
+            throw;
+        }
     }
 
     public OperationResult Stop(string appId)
+    {
+        using var lease = _lifecycle.Enter(appId);
+        return StopCore(appId);
+    }
+
+    internal OperationResult StopWhileLifecycleLocked(string appId) => StopCore(appId);
+
+    private OperationResult StopCore(string appId)
     {
         if (!_processes.TryRemove(appId, out var managed))
         {
@@ -117,7 +148,7 @@ public sealed class AppProcessManager : IDisposable
                     StoppedAtUtc = DateTimeOffset.UtcNow
                 };
                 _context.RuntimeStateStore.UpdateRunState(appId, persistedStoppedState);
-                return OperationResult.Success("App stopped.");
+                return StopOrphanProcesses(appId, "App stopped.");
             }
 
             if (!string.IsNullOrWhiteSpace(persistedStopError))
@@ -133,7 +164,7 @@ public sealed class AppProcessManager : IDisposable
                 StoppedAtUtc = DateTimeOffset.UtcNow
             };
             _context.RuntimeStateStore.UpdateRunState(appId, stoppedState);
-            return OperationResult.Success("App is not running.");
+            return StopOrphanProcesses(appId, "App is not running.");
         }
 
         try
@@ -152,7 +183,7 @@ public sealed class AppProcessManager : IDisposable
                 StoppedAtUtc = DateTimeOffset.UtcNow
             };
             _context.RuntimeStateStore.UpdateRunState(appId, stopped);
-            return OperationResult.Success("App stopped.");
+            return StopOrphanProcesses(appId, "App stopped.");
         }
         catch (Exception ex)
         {
@@ -162,6 +193,32 @@ public sealed class AppProcessManager : IDisposable
         {
             managed.Process.Dispose();
         }
+    }
+
+    private OperationResult StopOrphanProcesses(string appId, string successMessage)
+    {
+        var appsRoot = Path.GetFullPath(_context.Paths.AppsDirectory)
+            .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        var appRoot = Path.GetFullPath(Path.Combine(appsRoot, appId))
+            .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        if (!AppProcessUtilities.IsPathUnderDirectory(appRoot, appsRoot))
+        {
+            return OperationResult.Failure("APP_STOP_PATH_INVALID");
+        }
+
+        if (!Directory.Exists(appRoot))
+        {
+            return OperationResult.Success(successMessage);
+        }
+
+        var failures = AppProcessUtilities.StopProcessesFromDirectory(
+            appId,
+            appRoot,
+            message => _context.Log.Info("AppProcessManager", message),
+            message => _context.Log.Warn("AppProcessManager", message));
+        return failures.Count == 0
+            ? OperationResult.Success(successMessage)
+            : OperationResult.Failure(string.Join(" ", failures));
     }
 
     private bool TryStopPersistedProcess(InstalledAppState installed, out string? error)
@@ -220,8 +277,7 @@ public sealed class AppProcessManager : IDisposable
             var processFullPath = Path.GetFullPath(processPath)
                 .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
 
-            return processFullPath.StartsWith(installRoot + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) ||
-                   processFullPath.StartsWith(installRoot + Path.AltDirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
+            return AppProcessUtilities.IsPathUnderDirectory(processFullPath, installRoot);
         }
         catch (Exception ex)
         {
@@ -263,7 +319,7 @@ public sealed class AppProcessManager : IDisposable
         }
     }
 
-    private Process StartProcess(InstalledAppState installed)
+    private ManagedAppProcess StartProcess(InstalledAppState installed)
     {
         var manifest = installed.Manifest;
         var installRoot = GetInstallRoot(installed);
@@ -281,26 +337,93 @@ public sealed class AppProcessManager : IDisposable
             EnableRaisingEvents = true
         };
 
-        process.Exited += (_, _) =>
+        try
         {
-            _processes.TryRemove(installed.Id, out _);
-            var exitState = new AppRunState
+            if (!process.Start())
+            {
+                throw new InvalidOperationException($"APP_START_FAILED: {installed.Id}");
+            }
+        }
+        catch
+        {
+            process.Dispose();
+            throw;
+        }
+
+        var managed = new ManagedAppProcess(installed.Id, process, process.Id);
+        process.Exited += (_, _) => HandleProcessExit(installed.Id, managed);
+        return managed;
+    }
+
+    private void HandleProcessExit(string appId, ManagedAppProcess managed)
+    {
+        if (!TryRemoveManaged(appId, managed))
+        {
+            return;
+        }
+
+        string message;
+        try
+        {
+            message = $"App exited with code {managed.Process.ExitCode}.";
+        }
+        catch
+        {
+            message = "App exited.";
+        }
+
+        var exitState = new AppRunState
+        {
+            Status = "stopped",
+            IsRunning = false,
+            Message = message,
+            ProcessId = managed.ProcessId,
+            StoppedAtUtc = DateTimeOffset.UtcNow
+        };
+        _context.RuntimeStateStore.UpdateRunStateIfProcessId(appId, managed.ProcessId, exitState);
+        managed.Process.Dispose();
+    }
+
+    private void CleanupFailedStart(string appId, ManagedAppProcess managed)
+    {
+        TryRemoveManaged(appId, managed);
+        try
+        {
+            if (!managed.Process.HasExited)
+            {
+                managed.Process.Kill(entireProcessTree: true);
+                managed.Process.WaitForExit(5000);
+            }
+        }
+        catch (Exception ex)
+        {
+            _context.Log.Warn("AppProcessManager", $"Could not clean up failed start for app '{appId}': {ex.Message}");
+        }
+        finally
+        {
+            var stopped = new AppRunState
             {
                 Status = "stopped",
                 IsRunning = false,
-                Message = $"App exited with code {process.ExitCode}.",
-                ProcessId = process.Id,
+                Message = "App failed to start.",
+                ProcessId = managed.ProcessId,
                 StoppedAtUtc = DateTimeOffset.UtcNow
             };
-            _context.RuntimeStateStore.UpdateRunState(installed.Id, exitState);
-        };
-
-        if (!process.Start())
-        {
-            throw new InvalidOperationException($"APP_START_FAILED: {installed.Id}");
+            _context.RuntimeStateStore.UpdateRunStateIfProcessId(appId, managed.ProcessId, stopped);
+            try
+            {
+                managed.Process.Dispose();
+            }
+            catch
+            {
+            }
         }
+    }
 
-        return process;
+    private bool TryRemoveManaged(string appId, ManagedAppProcess managed)
+    {
+        return ((ICollection<KeyValuePair<string, ManagedAppProcess>>)_processes)
+            .Remove(new KeyValuePair<string, ManagedAppProcess>(appId, managed));
     }
 
     private ProcessStartInfo BuildStartInfo(string executablePath, string workingDirectory, AppManifest manifest, int? port)
@@ -593,5 +716,5 @@ public sealed class AppProcessManager : IDisposable
         return value.Contains(' ') ? $"\"{value}\"" : value;
     }
 
-    private sealed record ManagedAppProcess(string AppId, Process Process);
+    private sealed record ManagedAppProcess(string AppId, Process Process, int ProcessId);
 }

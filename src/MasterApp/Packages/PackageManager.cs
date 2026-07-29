@@ -1,8 +1,8 @@
 using MasterApp.Bootstrap;
+using MasterApp.Hosting;
 using MasterApp.Models;
 using MasterApp.Storage;
 using MasterApp.Utilities;
-using System.Diagnostics;
 using System.IO.Compression;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -15,10 +15,17 @@ public sealed class PackageManager
     private static readonly Regex VersionRegex = new("^[a-zA-Z0-9][a-zA-Z0-9._-]{0,49}$", RegexOptions.Compiled);
 
     private readonly BootstrapContext _context;
+    private readonly AppLifecycleCoordinator _lifecycle;
 
     public PackageManager(BootstrapContext context)
+        : this(context, new AppLifecycleCoordinator())
+    {
+    }
+
+    public PackageManager(BootstrapContext context, AppLifecycleCoordinator lifecycle)
     {
         _context = context;
+        _lifecycle = lifecycle;
     }
 
     public OperationResult ScanIncoming(string reason)
@@ -89,13 +96,14 @@ public sealed class PackageManager
             var manifest = LoadManifest(packageRoot);
 
             ValidateManifest(manifest);
+            using var lifecycleLease = _lifecycle.Enter(manifest.Id);
             StopRunningAppBeforeInstall(manifest.Id);
             BuildSourcePackageIfNeeded(manifest, packageRoot);
 
             var installPath = Path.Combine(_context.Paths.AppsDirectory, manifest.Id, manifest.Version);
             if (Directory.Exists(installPath))
             {
-                Directory.Delete(installPath, recursive: true);
+                DeleteDirectoryWithRetries(installPath);
             }
 
             Directory.CreateDirectory(Path.GetDirectoryName(installPath)!);
@@ -180,32 +188,23 @@ public sealed class PackageManager
     {
         var existing = _context.RuntimeStateStore.GetApp(appId);
         var processId = existing?.RunState.ProcessId;
-        if (existing?.RunState.IsRunning != true || processId is null || processId <= 0)
+        var appRoot = GetAppRoot(appId);
+        if (!Directory.Exists(appRoot))
         {
             return;
         }
 
-        try
+        var failures = AppProcessUtilities.StopProcessesFromDirectory(
+            appId,
+            appRoot,
+            message => _context.Log.Packages("PackageManager", message),
+            message => _context.Log.Packages("PackageManager", message));
+        if (failures.Count > 0)
         {
-            using var process = Process.GetProcessById(processId.Value);
-            if (process.HasExited)
-            {
-                return;
-            }
+            throw new InvalidOperationException($"APP_STOP_BEFORE_INSTALL_FAILED: {appId}. {string.Join(" ", failures)}");
+        }
 
-            _context.Log.Packages("PackageManager", $"Stopping running app '{appId}' (PID {processId.Value}) before install.");
-            process.Kill(entireProcessTree: true);
-            process.WaitForExit(10000);
-        }
-        catch (ArgumentException)
-        {
-            // Process already exited between state read and stop attempt.
-        }
-        catch (Exception ex)
-        {
-            throw new InvalidOperationException($"APP_STOP_BEFORE_INSTALL_FAILED: {appId}. {ex.Message}", ex);
-        }
-        finally
+        if (existing is not null)
         {
             _context.RuntimeStateStore.UpdateRunState(appId, new AppRunState
             {
@@ -324,8 +323,47 @@ public sealed class PackageManager
                 continue;
             }
 
-            Directory.Delete(versionDirectory, recursive: true);
+            DeleteDirectoryWithRetries(versionDirectory);
         }
+    }
+
+    private string GetAppRoot(string appId)
+    {
+        var appsRoot = Path.GetFullPath(_context.Paths.AppsDirectory)
+            .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        var appRoot = Path.GetFullPath(Path.Combine(appsRoot, appId))
+            .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        if (!AppProcessUtilities.IsPathUnderDirectory(appRoot, appsRoot))
+        {
+            throw new InvalidOperationException("PACKAGE_APP_PATH_INVALID");
+        }
+
+        return appRoot;
+    }
+
+    private static void DeleteDirectoryWithRetries(string directory)
+    {
+        const int maxAttempts = 5;
+        Exception? lastError = null;
+        for (var attempt = 1; attempt <= maxAttempts; attempt++)
+        {
+            try
+            {
+                Directory.Delete(directory, recursive: true);
+                return;
+            }
+            catch (Exception ex) when (attempt < maxAttempts)
+            {
+                lastError = ex;
+                Thread.Sleep(250);
+            }
+            catch (Exception ex)
+            {
+                lastError = ex;
+            }
+        }
+
+        throw new IOException($"Could not remove app directory '{directory}' after {maxAttempts} attempts.", lastError);
     }
 
     private static void ValidateManifest(AppManifest manifest)
